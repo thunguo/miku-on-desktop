@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Testing / linting / type-checking caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# Serena MCP 项目数据（本地工具缓存，非项目源码）
+.serena/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本地敏感信息
+.env
+*.env.local

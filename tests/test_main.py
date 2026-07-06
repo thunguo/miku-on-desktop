@@ -1,0 +1,212 @@
+"""main.py 里纯函数式装配逻辑的回归测试：provider 构造、prompt 片段格式化、
+agent profile 同步、历史消息 rebase。``main()``/``_brain_main`` 本身装配 Qt 与
+asyncio 事件循环，不在这里测试。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
+from miku_on_desk.brain.memory.models import Entity, Fact
+from miku_on_desk.brain.providers.anthropic_provider import AnthropicProvider
+from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
+from miku_on_desk.brain.providers.gemini_provider import GeminiProvider
+from miku_on_desk.brain.providers.openai_compatible_provider import OpenAICompatibleProvider
+from miku_on_desk.config.settings import (
+    AgentProfileConfig,
+    ModelRouterConfig,
+    ModelTier,
+    PersonaConfig,
+    ProviderConfig,
+    ProviderName,
+)
+from miku_on_desk.main import (
+    _append_reminder,
+    _build_identity_prompt,
+    _build_providers,
+    _extract_assistant_text,
+    _format_agents_summary,
+    _format_core_memory,
+    _format_memory_index,
+    _rebase_history,
+    _sync_agent_profiles,
+)
+
+
+def test_build_providers_only_constructs_enabled_providers() -> None:
+    config = ModelRouterConfig(
+        anthropic=ProviderConfig(api_key="sk-ant", models={ModelTier.FAST: "haiku"}),
+        openai=ProviderConfig(api_key=None, models={}),
+        gemini=ProviderConfig(api_key="sk-gemini", models={ModelTier.HEAVY: "gemini-pro"}),
+    )
+
+    providers = _build_providers(config)
+
+    assert set(providers) == {ProviderName.ANTHROPIC, ProviderName.GEMINI}
+    assert isinstance(providers[ProviderName.ANTHROPIC], AnthropicProvider)
+    assert isinstance(providers[ProviderName.GEMINI], GeminiProvider)
+
+
+def test_build_providers_constructs_openai_compatible_provider() -> None:
+    config = ModelRouterConfig(
+        openai=ProviderConfig(api_key="sk-openai", models={ModelTier.MEDIUM: "gpt-5"})
+    )
+
+    providers = _build_providers(config)
+
+    assert isinstance(providers[ProviderName.OPENAI], OpenAICompatibleProvider)
+
+
+def test_format_agents_summary_skips_disabled_profiles() -> None:
+    profiles = [
+        AgentProfile(id="1", name="researcher", description="调研", system_prompt="x"),
+        AgentProfile(id="2", name="ghost", description="已禁用", system_prompt="x", enabled=False),
+    ]
+
+    summary = _format_agents_summary(profiles)
+
+    assert "researcher：调研" in summary
+    assert "ghost" not in summary
+
+
+def _make_fact(*, subject: str, predicate: str, value: str, pinned: bool = False) -> Fact:
+    return Fact(
+        id="",
+        subject=subject,
+        subject_type="person",
+        predicate=predicate,
+        object=value,
+        object_type="concept",
+        confidence=1.0,
+        source=[],
+        valid_from="2026-01-01T00:00:00",
+        recorded_at="2026-01-01T00:00:00",
+        extracted_by="tool:remember",
+        status="active",
+        pinned=pinned,
+    )
+
+
+def test_format_core_memory_renders_key_value_lines() -> None:
+    facts = [
+        _make_fact(subject="user", predicate="name", value="tew", pinned=True),
+        _make_fact(subject="user", predicate="role", value="engineer", pinned=True),
+    ]
+
+    formatted = _format_core_memory(facts)
+
+    assert formatted == "- user/name：tew\n- user/role：engineer"
+
+
+def test_format_memory_index_renders_keys_only() -> None:
+    entities = [Entity(id="e1", name="tew", type="person")]
+    facts = [
+        _make_fact(subject="user", predicate="habits/sleep_schedule", value="喜欢熬夜"),
+        _make_fact(subject="user", predicate="habits/coffee", value="喝美式"),
+    ]
+
+    formatted = _format_memory_index(entities, facts)
+
+    assert formatted == "- tew\n- user/habits/sleep_schedule\n- user/habits/coffee"
+    assert "喜欢熬夜" not in formatted
+
+
+def test_build_identity_prompt_interpolates_persona_fields() -> None:
+    persona = PersonaConfig(name="小明", role="程序员助手", personality="冷静克制")
+
+    prompt = _build_identity_prompt(persona)
+
+    assert "你是小明，程序员助手。" in prompt
+    assert "说话风格：冷静克制。" in prompt
+    assert "remember/recall" in prompt
+    assert "3D 模型" not in prompt
+    assert "2D 精灵图" in prompt
+
+
+def test_sync_agent_profiles_creates_new_profile(tmp_path: Path) -> None:
+    manager = AgentManager(tmp_path / "agents.db")
+    try:
+        _sync_agent_profiles(
+            manager, [AgentProfileConfig(name="custom", system_prompt="你是自定义助手")]
+        )
+
+        created = next(p for p in manager.list_agents() if p.name == "custom")
+        assert created.system_prompt == "你是自定义助手"
+        assert created.builtin is False
+    finally:
+        manager.close()
+
+
+def test_sync_agent_profiles_updates_builtin_without_renaming(tmp_path: Path) -> None:
+    manager = AgentManager(tmp_path / "agents.db")
+    try:
+        builtin = next(p for p in manager.list_agents() if p.builtin)
+
+        _sync_agent_profiles(
+            manager,
+            [AgentProfileConfig(name=builtin.name, system_prompt="更新后的提示词", enabled=False)],
+        )
+
+        updated = manager.get_agent(builtin.id)
+        assert updated is not None
+        assert updated.name == builtin.name
+        assert updated.system_prompt == "更新后的提示词"
+        assert updated.enabled is False
+    finally:
+        manager.close()
+
+
+def test_extract_assistant_text_returns_last_assistant_message_plain_string() -> None:
+    history = [
+        Message(role="user", content="你好"),
+        Message(role="assistant", content="你好呀"),
+        Message(role="user", content="在干嘛"),
+        Message(role="assistant", content="在摸鱼"),
+    ]
+
+    assert _extract_assistant_text(history) == "在摸鱼"
+
+
+def test_extract_assistant_text_joins_text_blocks_and_skips_tool_use() -> None:
+    history = [
+        Message(
+            role="assistant",
+            content=[
+                TextBlock(text="让我看看"),
+                ToolUseBlock(id="1", name="screen_analyze", input={}),
+                TextBlock(text="好了"),
+            ],
+        )
+    ]
+
+    assert _extract_assistant_text(history) == "让我看看好了"
+
+
+def test_extract_assistant_text_returns_empty_string_when_no_assistant_message() -> None:
+    assert _extract_assistant_text([Message(role="user", content="你好")]) == ""
+
+
+def test_append_reminder_prefixes_latest_user_text_with_reminder() -> None:
+    history = [Message(role="assistant", content="早")]
+
+    result = _append_reminder(history, "帮我开一下计算器", "<reminder>现在是早上</reminder>")
+
+    assert len(result) == 2
+    assert result[0] is history[0]
+    assert result[1].role == "user"
+    assert result[1].content == "<reminder>现在是早上</reminder>\n\n帮我开一下计算器"
+
+
+def test_rebase_history_replaces_augmented_turn_with_plain_text() -> None:
+    history = [Message(role="assistant", content="早")]
+    result_messages = [
+        *history,
+        Message(role="user", content="<reminder>...</reminder>\n\n帮我开一下计算器"),
+        Message(role="assistant", content="好的"),
+    ]
+
+    rebased = _rebase_history(len(history), result_messages, "帮我开一下计算器")
+
+    assert rebased[1] == Message(role="user", content="帮我开一下计算器")
+    assert rebased[2] == Message(role="assistant", content="好的")

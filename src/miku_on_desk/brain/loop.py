@@ -1,0 +1,366 @@
+"""AI 循环：驱动一次用户输入到最终回复之间的多轮"模型流式响应 ↔ 工具执行"往复。
+
+核心结构是一个有界的工具调用循环：
+
+    while (toolUses.length > 0 && rounds < maxToolRounds) { ... }
+
+每一轮做三件事——按需压缩上下文、按需注入排队消息、追加回合预算软性提醒——然后执行当前
+这批工具调用，把结果连同下一轮流式请求的结果一起推进历史，直到模型不再请求任何工具、或
+撞上回合预算上限、或 provider 返回错误。
+
+循环里四处不显眼但共同支撑长任务稳定性的机制,按各自依赖的具体子系统是否已存在分成两类：
+回合预算软性提醒、墙钟时间软性提醒（``LoopConfig.deadline_s``，供 ``spawn_agents`` 的子
+agent 复用，见 ``agents/spawn.py``）都不依赖任何外部子系统，纯靠 rounds 计数/
+``time.monotonic()`` 就能实现，直接内置；中途压缩上下文（依赖尚未实现的 memory/store.py，
+对应任务 #12）和排队消息注入（本项目目前没有任何消息队列来源）做成可选的注入点，传
+``None`` 时原样跳过——等对应子系统就位后再传入真正的回调，不需要改动循环本身。
+
+授权确认这一环做了对应本项目场景的简化：本项目单机单用户，确认回调就是本地一个气泡对话框
+的点击结果，不存在"某一路迟迟不响应"的问题，直接 ``await callbacks.confirm(...)`` 就够，不
+需要一整套"立即返回 paused、靠独立恢复路径重新进入"的多路并发恢复状态机。
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from time import monotonic
+
+from miku_on_desk.brain.model_router import ModelRouter, NoModelAvailableError, ResolvedModel
+from miku_on_desk.brain.providers.base import (
+    ContentBlock,
+    Message,
+    OnContent,
+    OnThinking,
+    Provider,
+    StreamResult,
+    TextBlock,
+    ToolDefinition,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from miku_on_desk.brain.providers.retry import stream_with_retry
+from miku_on_desk.brain.tools.policy import Decision
+from miku_on_desk.brain.tools.registry import ToolRegistry
+from miku_on_desk.config.settings import ModelTier, ProviderName
+
+logger = logging.getLogger(__name__)
+
+ConfirmCallback = Callable[[ToolUseBlock, str | None], Awaitable[bool]]
+CompactContextCallback = Callable[[list[Message]], Awaitable[list[Message] | None]]
+
+
+@dataclass(frozen=True)
+class LoopConfig:
+    max_tool_rounds: int = 100
+    idle_timeout_s: float = 120.0
+    hard_timeout_s: float = 600.0
+    budget_caution_remaining: int = 10
+    budget_critical_remaining: int = 3
+    deadline_s: float | None = None
+    time_caution_remaining_s: float = 60.0
+    time_critical_remaining_s: float = 20.0
+
+
+@dataclass(frozen=True)
+class QueuedMessage:
+    """长工具链跑到一半时用户插话产生的一条待注入消息。"""
+
+    queued_id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class LoopCallbacks:
+    """``confirm`` 必填——policy 给出 ASK 决策时必须有地方问用户；其余均为可选的 UI 通知点。"""
+
+    confirm: ConfirmCallback
+    on_content: OnContent | None = None
+    on_thinking: OnThinking | None = None
+    on_tool_use: Callable[[ToolUseBlock], None] | None = None
+    on_tool_result: Callable[[ToolResultBlock], None] | None = None
+    on_queued_message_injected: Callable[[QueuedMessage], None] | None = None
+    consume_queued_message: Callable[[], QueuedMessage | None] | None = None
+    compact_context: CompactContextCallback | None = None
+
+
+class LoopStopReason(StrEnum):
+    DONE = "done"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    TIME_EXHAUSTED = "time_exhausted"
+    PROVIDER_ERROR = "provider_error"
+    NO_MODEL_AVAILABLE = "no_model_available"
+    USER_CANCELLED = "user_cancelled"
+
+
+@dataclass(frozen=True)
+class LoopResult:
+    stop_reason: LoopStopReason
+    messages: list[Message]
+    rounds: int
+    error: str | None = None
+    raw_error: str | None = None
+
+
+def _assistant_message_from_content(text: str, tool_uses: list[ToolUseBlock]) -> Message:
+    blocks: list[ContentBlock] = []
+    if text:
+        blocks.append(TextBlock(text=text))
+    blocks.extend(tool_uses)
+    return Message(role="assistant", content=blocks)
+
+
+def _append_budget_warning(messages: list[Message], text: str) -> None:
+    """把提醒拼进最近一个 tool_result 的尾部，而不是新增一条消息——避免打断 prompt cache 前缀。"""
+    for message in reversed(messages):
+        if not isinstance(message.content, list):
+            continue
+        for block in reversed(message.content):
+            if isinstance(block, ToolResultBlock):
+                block.content = f"{block.content}\n\n{text}"
+                return
+    logger.debug("没有找到可挂载回合预算提醒的 tool_result，跳过本次提醒：%s", text)
+
+
+def _budget_warning_text(remaining: int, max_tool_rounds: int, tier: int) -> str:
+    if tier == 2:
+        return (
+            f"[turn-budget] 只剩 {remaining}/{max_tool_rounds} 个工具调用回合，"
+            "除非绝对必要，这应是最后一轮。"
+        )
+    return (
+        f"[turn-budget] 剩余 {remaining}/{max_tool_rounds} 个工具调用回合，"
+        "请考虑剩余工作是否能在预算内完成。"
+    )
+
+
+def _time_warning_text(remaining_s: float, tier: int) -> str:
+    if tier == 2:
+        return f"[time-budget] 剩余时间不足 {remaining_s:.0f} 秒，除非绝对必要，这应是最后一轮。"
+    return f"[time-budget] 剩余时间约 {remaining_s:.0f} 秒，请考虑剩余工作是否能在预算内完成。"
+
+
+async def _resolve_tool_call(
+    tool_use: ToolUseBlock,
+    *,
+    registry: ToolRegistry,
+    session_id: str,
+    callbacks: LoopCallbacks,
+) -> ToolResultBlock:
+    if callbacks.on_tool_use is not None:
+        callbacks.on_tool_use(tool_use)
+
+    decision = registry.evaluate(tool_use, session_id=session_id)
+    if decision.decision == Decision.DENY:
+        result = ToolResultBlock(
+            tool_use_id=tool_use.id,
+            content=decision.reason or f'工具 "{tool_use.name}" 被拒绝。',
+            is_error=True,
+        )
+    elif decision.decision == Decision.ASK:
+        approved = await callbacks.confirm(tool_use, decision.reason)
+        if approved:
+            result = await registry.execute(tool_use, session_id=session_id)
+        else:
+            result = ToolResultBlock(
+                tool_use_id=tool_use.id, content="用户拒绝了这次操作确认。", is_error=True
+            )
+    else:
+        result = await registry.execute(tool_use, session_id=session_id)
+
+    if callbacks.on_tool_result is not None:
+        callbacks.on_tool_result(result)
+    return result
+
+
+async def _stream_with_fallback(
+    *,
+    router: ModelRouter,
+    providers: Mapping[ProviderName, Provider],
+    resolved: ResolvedModel,
+    tier: ModelTier,
+    system: str,
+    messages: list[Message],
+    tools: list[ToolDefinition],
+    callbacks: LoopCallbacks,
+    config: LoopConfig,
+) -> tuple[StreamResult, ResolvedModel]:
+    """先对 `resolved` 指向的 Provider 做带重试的流式调用；重试耗尽后若跨 Provider 降级
+    开启且能找到替代 Provider，再整体尝试一次替代 Provider。替代 Provider 成功时，返回的
+    `ResolvedModel` 会替换调用方持有的那份，让后续轮次继续使用这个证明可用的 Provider，而
+    不是每轮都退回原本失败的那个。替代 Provider 也失败时，保留并返回原始 Provider 的错误——
+    它是这次失败链条里更有信息量的那一个。
+    """
+    provider = providers[resolved.provider]
+    result = await stream_with_retry(
+        provider,
+        model=resolved.model_id,
+        system=system,
+        messages=messages,
+        tools=tools,
+        on_content=callbacks.on_content,
+        on_thinking=callbacks.on_thinking,
+        idle_timeout_s=config.idle_timeout_s,
+        hard_timeout_s=config.hard_timeout_s,
+    )
+    if result.success:
+        return result, resolved
+
+    fallback = router.resolve_fallback(tier, exclude=resolved.provider)
+    if fallback is None:
+        return result, resolved
+
+    logger.debug(
+        "provider %s 重试耗尽（%s），降级到 %s", resolved.provider, result.error, fallback.provider
+    )
+    fallback_provider = providers[fallback.provider]
+    fallback_result = await stream_with_retry(
+        fallback_provider,
+        model=fallback.model_id,
+        system=system,
+        messages=messages,
+        tools=tools,
+        on_content=callbacks.on_content,
+        on_thinking=callbacks.on_thinking,
+        idle_timeout_s=config.idle_timeout_s,
+        hard_timeout_s=config.hard_timeout_s,
+    )
+    if fallback_result.success:
+        return fallback_result, fallback
+    return result, resolved
+
+
+async def run_ai_loop(
+    *,
+    session_id: str,
+    tier: ModelTier,
+    router: ModelRouter,
+    providers: Mapping[ProviderName, Provider],
+    registry: ToolRegistry,
+    system: str,
+    messages: list[Message],
+    callbacks: LoopCallbacks,
+    config: LoopConfig | None = None,
+) -> LoopResult:
+    config = config or LoopConfig()
+
+    try:
+        resolved = router.resolve(tier)
+    except NoModelAvailableError as exc:
+        return LoopResult(
+            stop_reason=LoopStopReason.NO_MODEL_AVAILABLE,
+            messages=messages,
+            rounds=0,
+            error=str(exc),
+        )
+    working_messages = list(messages)
+    result, resolved = await _stream_with_fallback(
+        router=router,
+        providers=providers,
+        resolved=resolved,
+        tier=tier,
+        system=system,
+        messages=working_messages,
+        tools=registry.definitions(),
+        callbacks=callbacks,
+        config=config,
+    )
+    if not result.success:
+        return LoopResult(
+            stop_reason=LoopStopReason.PROVIDER_ERROR,
+            messages=working_messages,
+            rounds=0,
+            error=result.error,
+            raw_error=result.raw_error,
+        )
+    working_messages.append(_assistant_message_from_content(result.content, result.tool_uses))
+    tool_uses = result.tool_uses
+
+    rounds = 0
+    last_budget_warning_tier = 0
+    last_time_warning_tier = 0
+    start = monotonic()
+    time_exhausted = False
+
+    while tool_uses and rounds < config.max_tool_rounds:
+        remaining_s = (
+            None if config.deadline_s is None else config.deadline_s - (monotonic() - start)
+        )
+        if remaining_s is not None and remaining_s <= 0:
+            time_exhausted = True
+            break
+
+        if rounds > 0 and callbacks.compact_context is not None:
+            compacted = await callbacks.compact_context(working_messages)
+            if compacted is not None:
+                working_messages = compacted
+
+        if callbacks.consume_queued_message is not None:
+            queued = callbacks.consume_queued_message()
+            if queued is not None:
+                working_messages.append(Message(role="user", content=queued.text))
+                if callbacks.on_queued_message_injected is not None:
+                    callbacks.on_queued_message_injected(queued)
+
+        remaining = config.max_tool_rounds - rounds
+        tier_level = 0
+        if remaining <= config.budget_critical_remaining:
+            tier_level = 2
+        elif remaining <= config.budget_caution_remaining:
+            tier_level = 1
+        if tier_level > last_budget_warning_tier:
+            last_budget_warning_tier = tier_level
+            warning_text = _budget_warning_text(remaining, config.max_tool_rounds, tier_level)
+            _append_budget_warning(working_messages, warning_text)
+
+        if remaining_s is not None:
+            time_tier_level = 0
+            if remaining_s <= config.time_critical_remaining_s:
+                time_tier_level = 2
+            elif remaining_s <= config.time_caution_remaining_s:
+                time_tier_level = 1
+            if time_tier_level > last_time_warning_tier:
+                last_time_warning_tier = time_tier_level
+                time_warning_text = _time_warning_text(remaining_s, time_tier_level)
+                _append_budget_warning(working_messages, time_warning_text)
+
+        tool_results = [
+            await _resolve_tool_call(
+                tool_use, registry=registry, session_id=session_id, callbacks=callbacks
+            )
+            for tool_use in tool_uses
+        ]
+        working_messages.append(Message(role="user", content=list(tool_results)))
+
+        result, resolved = await _stream_with_fallback(
+            router=router,
+            providers=providers,
+            resolved=resolved,
+            tier=tier,
+            system=system,
+            messages=working_messages,
+            tools=registry.definitions(),
+            callbacks=callbacks,
+            config=config,
+        )
+        rounds += 1
+        if not result.success:
+            return LoopResult(
+                stop_reason=LoopStopReason.PROVIDER_ERROR,
+                messages=working_messages,
+                rounds=rounds,
+                error=result.error,
+                raw_error=result.raw_error,
+            )
+        working_messages.append(_assistant_message_from_content(result.content, result.tool_uses))
+        tool_uses = result.tool_uses
+
+    if time_exhausted:
+        stop_reason = LoopStopReason.TIME_EXHAUSTED
+    elif tool_uses and rounds >= config.max_tool_rounds:
+        stop_reason = LoopStopReason.BUDGET_EXHAUSTED
+    else:
+        stop_reason = LoopStopReason.DONE
+    return LoopResult(stop_reason=stop_reason, messages=working_messages, rounds=rounds)
