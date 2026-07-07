@@ -119,3 +119,9 @@ def test_ideal_height_reserves_extra_space_for_confirmation_buttons(qapp: QAppli
     confirm_height = confirm_bubble.ideal_height(200)
 
     assert confirm_height > speech_height
+
+
+def test_has_non_empty_stylesheet(qapp: QApplication) -> None:
+    bubble = SpeechBubble()
+
+    assert bubble.styleSheet().strip() != ""

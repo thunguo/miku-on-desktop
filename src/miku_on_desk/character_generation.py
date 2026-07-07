@@ -518,6 +518,7 @@ class GenerationProgress:
     completed_states: int
     total_states: int
     strip_image: Image.Image | None = None
+    reference_image: Image.Image | None = None
 
 
 class GenerationCancelled(Exception):
@@ -537,6 +538,7 @@ def generate_character(
     on_progress(GenerationProgress("reference", "", 0, len(STATE_SPECS)))
     reference = generate_reference_image(client, config)
     reference.save(config.output_dir / "reference.png")
+    on_progress(GenerationProgress("reference", "", 0, len(STATE_SPECS), reference_image=reference))
     if should_cancel():
         raise GenerationCancelled()
 

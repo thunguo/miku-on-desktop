@@ -84,3 +84,9 @@ def test_deactivation_closes_popup(qapp: QApplication, monkeypatch: pytest.Monke
     popup.changeEvent(QEvent(QEvent.Type.ActivationChange))
 
     assert closed == [None]
+
+
+def test_input_has_non_empty_stylesheet(qapp: QApplication) -> None:
+    popup = ChatPopup()
+
+    assert popup._input.styleSheet().strip() != ""
