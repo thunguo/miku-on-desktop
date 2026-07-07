@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QFormLayout
+from qfluentwidgets import InfoBar, MessageBox
 
 from miku_on_desk.config.settings import (
     AcpAgentConfig,
@@ -24,6 +25,14 @@ from miku_on_desk.face.ui.settings_panel import (
     _QWEN_FAST_MODEL,
     SettingsPanel,
 )
+
+
+def _accept_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MessageBox, "exec", lambda self: 1)
+
+
+def _reject_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MessageBox, "exec", lambda self: 0)
 
 
 def test_provider_fields_load_from_settings(qapp: QApplication) -> None:
@@ -407,7 +416,18 @@ def test_save_button_writes_settings_to_disk_and_emits_signal(
     assert AppSettings.load(settings_path).window.x == 999
 
 
-def test_mcp_editor_add_edit_and_remove(qapp: QApplication) -> None:
+def test_save_button_shows_success_info_bar(qapp: QApplication, tmp_path: Path) -> None:
+    panel = SettingsPanel(AppSettings(), tmp_path / "settings.json")
+
+    panel._on_save_clicked()
+
+    assert panel.findChildren(InfoBar)
+
+
+def test_mcp_editor_add_edit_and_remove(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accept_message_box(monkeypatch)
     configs: list[McpServerConfig] = []
     panel = SettingsPanel(AppSettings(mcp_servers=configs), Path("unused.json"))
     editor = panel._mcp_editor
@@ -496,7 +516,10 @@ def test_selecting_remote_config_populates_transport_and_url(qapp: QApplication)
     assert editor._headers_edit.toPlainText() == "X-Token=xyz"
 
 
-def test_agent_profile_editor_add_edit_and_remove(qapp: QApplication) -> None:
+def test_agent_profile_editor_add_edit_and_remove(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accept_message_box(monkeypatch)
     configs: list[AgentProfileConfig] = []
     panel = SettingsPanel(AppSettings(agent_profiles=configs), Path("unused.json"))
     editor = panel._agent_editor
@@ -518,7 +541,10 @@ def test_agent_profile_editor_add_edit_and_remove(qapp: QApplication) -> None:
     assert editor._configs == []
 
 
-def test_acp_editor_add_edit_and_remove(qapp: QApplication) -> None:
+def test_acp_editor_add_edit_and_remove(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accept_message_box(monkeypatch)
     configs: list[AcpAgentConfig] = []
     panel = SettingsPanel(AppSettings(acp_agents=configs), Path("unused.json"))
     editor = panel._acp_editor
@@ -606,3 +632,76 @@ def test_list_editors_have_bordered_fixed_height_list_widget(qapp: QApplication)
         assert editor._list.height() == 120
         assert editor._list.property("lightCustomQss")
         assert editor._list.property("darkCustomQss")
+
+
+def test_invalid_numeric_input_shows_warning_and_clears_on_valid_input(
+    qapp: QApplication,
+) -> None:
+    panel = SettingsPanel(AppSettings(), Path("unused.json"))
+    assert panel._window_x_warning.isHidden()
+    assert not panel._window_x_edit.property("lightCustomQss")
+
+    panel._window_x_edit.setText("not-a-number")
+
+    assert not panel._window_x_warning.isHidden()
+    assert "将使用默认值" in panel._window_x_warning.text()
+    assert panel._window_x_edit.property("lightCustomQss")
+
+    panel._window_x_edit.setText("42")
+
+    assert panel._window_x_warning.isHidden()
+    assert not panel._window_x_edit.property("lightCustomQss")
+
+
+def test_invalid_float_numeric_input_shows_warning(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(), Path("unused.json"))
+
+    panel._window_scale_edit.setText("not-a-float")
+
+    assert not panel._window_scale_warning.isHidden()
+
+    panel._window_scale_edit.setText("1.5")
+
+    assert panel._window_scale_warning.isHidden()
+
+
+def test_mcp_editor_remove_does_nothing_when_confirmation_declined(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    configs = [McpServerConfig(name="weather", command="weather-mcp")]
+    panel = SettingsPanel(AppSettings(mcp_servers=configs), Path("unused.json"))
+    editor = panel._mcp_editor
+
+    editor._list.setCurrentRow(0)
+    editor._on_remove()
+
+    assert len(editor._configs) == 1
+
+
+def test_agent_profile_editor_remove_does_nothing_when_confirmation_declined(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    configs = [AgentProfileConfig(name="researcher", system_prompt="p")]
+    panel = SettingsPanel(AppSettings(agent_profiles=configs), Path("unused.json"))
+    editor = panel._agent_editor
+
+    editor._list.setCurrentRow(0)
+    editor._on_remove()
+
+    assert len(editor._configs) == 1
+
+
+def test_acp_editor_remove_does_nothing_when_confirmation_declined(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    configs = [AcpAgentConfig(name="claude-code", executable="/usr/local/bin/claude")]
+    panel = SettingsPanel(AppSettings(acp_agents=configs), Path("unused.json"))
+    editor = panel._acp_editor
+
+    editor._list.setCurrentRow(0)
+    editor._on_remove()
+
+    assert len(editor._configs) == 1

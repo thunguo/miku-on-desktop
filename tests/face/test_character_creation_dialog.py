@@ -22,6 +22,7 @@ from miku_on_desk.face.ui.character_creation_dialog import (
     CharacterCreationDialog,
     _GenerationProgressView,
 )
+from miku_on_desk.face.ui.theme import RADIUS_LG, TEAL_MAIN, qcolor
 
 
 def _fill_valid_form(dialog: CharacterCreationDialog) -> None:
@@ -113,17 +114,21 @@ def test_prefill_from_settings_populates_credentials(qapp: QApplication, tmp_pat
     assert dialog._model_combo.currentText() == "gpt-image-2"
 
 
-def test_on_browse_reference_image_sets_path_and_label(
+def test_on_browse_reference_image_sets_path_label_and_thumbnail(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dialog = CharacterCreationDialog(tmp_path / "assets_pets", tmp_path / "settings.json")
     chosen = tmp_path / "ref.png"
+    Image.new("RGBA", (10, 10), (255, 0, 0, 255)).save(chosen)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_a, **_k: (str(chosen), ""))
+    assert dialog._reference_thumbnail.isHidden()
 
     dialog._on_browse_reference_image()
 
     assert dialog._reference_image_path == chosen
     assert dialog._reference_label.text() == "ref.png"
+    assert not dialog._reference_thumbnail.isHidden()
+    assert not dialog._reference_thumbnail.pixmap().isNull()
 
 
 def test_on_browse_reference_image_ignores_cancelled_dialog(
@@ -163,6 +168,26 @@ def test_generation_progress_view_on_progress_reference_stage_sets_status(
     view.on_progress(progress)
 
     assert view._status_label.text() == "生成基准参考图…"
+
+
+def test_generation_progress_view_on_progress_reference_stage_with_image_shows_result(
+    qapp: QApplication,
+) -> None:
+    view = _GenerationProgressView(4, 4)
+    reference_image = Image.new("RGBA", (8, 8), (40, 50, 60, 255))
+    progress = GenerationProgress(
+        stage="reference",
+        detail="",
+        completed_states=0,
+        total_states=len(STATE_SPECS),
+        reference_image=reference_image,
+    )
+
+    view.on_progress(progress)
+
+    assert view._reference_done is True
+    assert view._reference_tile._image_label.styleSheet() == view._reference_tile._done_style
+    assert not view._reference_tile._image_label.pixmap().isNull()
 
 
 def test_generation_progress_view_on_progress_strip_stage_updates_progress_and_tiles(
@@ -228,6 +253,45 @@ def test_generation_progress_view_finish_success_freezes_and_completes_bar(
     assert view._cancel_button.isEnabled() is False
 
 
+def test_finish_success_glow_fade_reaches_zero_alpha(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(QTimer, "singleShot", lambda _ms, fn: fn())
+    view = _GenerationProgressView(4, 4)
+
+    view.finish_success()
+
+    assert view._glow_fade_anim is not None
+    view._apply_glow_alpha(0)
+    color = qcolor(TEAL_MAIN, alpha=0)
+    assert view.styleSheet() == (
+        f"_GenerationProgressView {{ border: 2px solid "
+        f"rgba({color.red()}, {color.green()}, {color.blue()}, 0); "
+        f"border-radius: {RADIUS_LG}px; }}"
+    )
+
+
+def test_show_qa_warnings_populates_list_and_shows_it(qapp: QApplication) -> None:
+    view = _GenerationProgressView(4, 4)
+    assert view._qa_list.isHidden()
+
+    view.show_qa_warnings(["帧 0 完全透明", "整图尺寸不符"])
+
+    assert not view._qa_list.isHidden()
+    assert view._qa_list.count() == 2
+    assert view._qa_list.item(0).text() == "帧 0 完全透明"
+    assert view._qa_list.item(1).text() == "整图尺寸不符"
+
+
+def test_show_qa_warnings_is_noop_for_empty_list(qapp: QApplication) -> None:
+    view = _GenerationProgressView(4, 4)
+
+    view.show_qa_warnings([])
+
+    assert view._qa_list.isHidden()
+    assert view._qa_list.count() == 0
+
+
 def test_on_generation_finished_emits_character_created_and_freezes_progress_view(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -250,6 +314,28 @@ def test_on_generation_finished_emits_character_created_and_freezes_progress_vie
     assert dialog._worker is None
     assert created == [output_dir]
     assert progress_view._status_label.text() == "生成完成！"
+
+
+def test_on_generation_finished_shows_qa_warnings_when_problems_present(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(QTimer, "singleShot", lambda _ms, fn: fn())
+    assets_dir = tmp_path / "assets_pets"
+    dialog = CharacterCreationDialog(assets_dir, tmp_path / "settings.json")
+    output_dir = assets_dir / "new_pet"
+    dialog._output_dir = output_dir
+    progress_view = _GenerationProgressView(4, 4)
+    dialog._progress_view = progress_view
+    config = GenerationConfig(
+        pet_name="new_pet", description="d", output_dir=output_dir, api_key="sk-test"
+    )
+    dialog._worker = CharacterGenerationWorker(config, dialog)
+
+    dialog._on_generation_finished(Image.new("RGBA", (4, 4)), object(), ["帧 0 完全透明"])
+
+    assert not progress_view._qa_list.isHidden()
+    assert progress_view._qa_list.count() == 1
+    assert progress_view._qa_list.item(0).text() == "帧 0 完全透明"
 
 
 def test_on_generation_failed_shows_error_and_returns_to_form_view(

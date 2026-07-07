@@ -46,7 +46,7 @@ from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.radial_menu import RadialMenu
 from miku_on_desk.face.ui.speech_bubble import SpeechBubble
 from miku_on_desk.face.ui.sprite_widget import PetSpriteWidget
-from miku_on_desk.face.ui.theme import PINK_ACCENT, TEAL_DARK, TEAL_MAIN
+from miku_on_desk.face.ui.theme import HOVER_COLOR, PINK_ACCENT, PRESSED_COLOR, RADIUS_SM, TEAL_DARK
 
 if TYPE_CHECKING:
     from miku_on_desk.main import PetActions
@@ -75,15 +75,15 @@ _STOP_BUTTON_STYLE = f"""
 QPushButton {{
     background-color: {PINK_ACCENT};
     border: 2px solid {TEAL_DARK};
-    border-radius: 4px;
+    border-radius: {RADIUS_SM}px;
     color: white;
     font-weight: bold;
 }}
 QPushButton:hover {{
-    background-color: {TEAL_DARK};
+    background-color: {HOVER_COLOR};
 }}
 QPushButton:pressed {{
-    background-color: {TEAL_MAIN};
+    background-color: {PRESSED_COLOR};
 }}
 """
 
@@ -100,7 +100,7 @@ _PROGRESS_LABEL_STYLE = f"""
 QLabel {{
     background-color: {TEAL_DARK};
     color: white;
-    border-radius: 4px;
+    border-radius: {RADIUS_SM}px;
     padding: 2px 6px;
     font-size: 11px;
 }}

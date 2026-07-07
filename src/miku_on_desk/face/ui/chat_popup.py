@@ -13,7 +13,7 @@ from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QWidget
 
-from miku_on_desk.face.ui.theme import TEAL_DARK
+from miku_on_desk.face.ui.theme import RADIUS_XL, TEAL_DARK
 
 _WIDTH = 320
 _HEIGHT = 44
@@ -22,7 +22,7 @@ _INPUT_STYLE = f"""
 QLineEdit {{
     background-color: rgba(143, 218, 198, 200);
     border: 2px solid {TEAL_DARK};
-    border-radius: 16px;
+    border-radius: {RADIUS_XL}px;
     padding: 6px 14px;
     color: #1a1a1a;
     font-size: 14px;
