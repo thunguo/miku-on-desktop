@@ -521,10 +521,18 @@ def _on_character_switched(pet_dir: Path, window: OverlayWindow, settings_path: 
 
 
 def _open_character_creation_dialog(
-    gallery_panel: CharacterGalleryPanel, settings_path: Path, open_windows: list[QWidget]
+    window: OverlayWindow,
+    gallery_panel: CharacterGalleryPanel,
+    settings_path: Path,
+    open_windows: list[QWidget],
 ) -> CharacterCreationDialog:
     dialog = CharacterCreationDialog(_assets_pets_dir(), settings_path)
-    dialog.character_created.connect(gallery_panel.on_character_created)
+
+    def _on_created(pet_dir: Path) -> None:
+        _on_character_switched(pet_dir, window, settings_path)
+        gallery_panel.on_character_created(pet_dir)
+
+    dialog.character_created.connect(_on_created)
     open_windows.append(dialog)
     dialog.show()
     return dialog
@@ -541,7 +549,7 @@ def _open_character_gallery(
         lambda new_pet_dir: _on_character_switched(new_pet_dir, window, settings_path)
     )
     panel.create_requested.connect(
-        lambda: _open_character_creation_dialog(panel, settings_path, open_windows)
+        lambda: _open_character_creation_dialog(window, panel, settings_path, open_windows)
     )
     open_windows.append(panel)
     panel.show()

@@ -945,3 +945,18 @@ def test_set_pet_dir_replaces_sprite_widget_and_resets_state_machine(
     assert window._sprite_widget.width() == other_frame_size
     assert window.width() == other_frame_size
 
+
+def test_set_pet_dir_new_sprite_widget_is_visible_after_window_shown(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """新精灵是在窗口已经 show() 过之后创建的子 widget，不会被 Qt 的显示级联覆盖，
+    必须显式 show()——否则会出现"切换成功但看不见，要重启才显示"的问题。
+    """
+    other_pet_dir = _make_pet_dir(tmp_path, dir_name="other_pet", pet_name="other_pet")
+    window = _make_window(tmp_path)
+    window.show()
+
+    window.set_pet_dir(other_pet_dir)
+
+    assert window._sprite_widget.isVisibleTo(window) is True
+
