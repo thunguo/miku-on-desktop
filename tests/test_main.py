@@ -5,7 +5,11 @@ asyncio 事件循环，不在这里测试。
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+from PIL import Image
+from PySide6.QtWidgets import QApplication
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
 from miku_on_desk.brain.memory.models import Entity, Fact
@@ -15,12 +19,15 @@ from miku_on_desk.brain.providers.gemini_provider import GeminiProvider
 from miku_on_desk.brain.providers.openai_compatible_provider import OpenAICompatibleProvider
 from miku_on_desk.config.settings import (
     AgentProfileConfig,
+    AppSettings,
     ModelRouterConfig,
     ModelTier,
     PersonaConfig,
     ProviderConfig,
     ProviderName,
 )
+from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel
+from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.main import (
     _append_reminder,
     _build_identity_prompt,
@@ -29,6 +36,7 @@ from miku_on_desk.main import (
     _format_agents_summary,
     _format_core_memory,
     _format_memory_index,
+    _open_character_creation_dialog,
     _rebase_history,
     _sync_agent_profiles,
 )
@@ -210,3 +218,50 @@ def test_rebase_history_replaces_augmented_turn_with_plain_text() -> None:
 
     assert rebased[1] == Message(role="user", content="帮我开一下计算器")
     assert rebased[2] == Message(role="assistant", content="好的")
+
+
+_FRAME_SIZE = 4
+
+
+def _make_pet_dir(base: Path, name: str) -> Path:
+    pet_dir = base / name
+    pet_dir.mkdir()
+    Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE), (255, 0, 0, 255)).save(
+        pet_dir / "spritesheet.png"
+    )
+    meta = {
+        "pet_name": name,
+        "frame_width": _FRAME_SIZE,
+        "frame_height": _FRAME_SIZE,
+        "columns": 1,
+        "rows": 1,
+        "fallback_state": "idle",
+        "states": {"idle": {"row": 0, "frame_count": 1, "fps": 1.0, "loop": True}},
+    }
+    (pet_dir / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
+    return pet_dir
+
+
+def test_character_created_hot_switches_window_and_persists_settings(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """新角色生成完成后应立即热切换桌宠窗口并持久化 settings，不需要重启应用，
+    也不需要用户再手动去画廊点一次切换。
+    """
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    old_pet_dir = _make_pet_dir(assets_pets_dir, "old_pet")
+    new_pet_dir = _make_pet_dir(assets_pets_dir, "new_pet")
+    settings_path = tmp_path / "settings.json"
+
+    window = OverlayWindow(old_pet_dir)
+    window.show()
+    gallery_panel = CharacterGalleryPanel(assets_pets_dir, old_pet_dir)
+
+    dialog = _open_character_creation_dialog(window, gallery_panel, settings_path, [])
+    dialog.character_created.emit(new_pet_dir)
+
+    assert window._meta.pet_name == "new_pet"
+    assert window._sprite_widget.isVisibleTo(window) is True
+    assert AppSettings.load(settings_path).window.pet_dir == new_pet_dir
+    assert gallery_panel._current_pet_dir == new_pet_dir

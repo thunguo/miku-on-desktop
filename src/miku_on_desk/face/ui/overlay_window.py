@@ -400,12 +400,16 @@ class OverlayWindow(QWidget):
     def set_pet_dir(self, pet_dir: Path) -> None:
         """整体替换精灵图部件切换到另一个角色——``PetSpriteWidget`` 没有热重载方法，
         所有 (状态, 帧) 组合都是构造时预裁剪/预缩放进 ``QPixmap`` 缓存的。
+
+        新建的子 widget 在本窗口早已 ``show()`` 过之后才创建，不会被纳入 Qt 那次一次性
+        的显示级联，默认处于隐藏状态——必须显式 ``show()``，否则精灵会"切换成功但看不见"。
         """
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
         sheet_path = pet_dir / "spritesheet.png"
         old_sprite_widget = self._sprite_widget
         self._sprite_widget = PetSpriteWidget(meta, sheet_path, scale=self._scale, parent=self)
         self._sprite_widget.move(old_sprite_widget.pos())
+        self._sprite_widget.show()
         old_sprite_widget.deleteLater()
         self._meta = meta
         self._state_machine = PetStateMachine()
