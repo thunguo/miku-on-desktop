@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -30,8 +31,10 @@ from qfluentwidgets import (
     FluentIcon,
     FluentWindow,
     HeaderCardWidget,
+    InfoBar,
     LineEdit,
     ListWidget,
+    MessageBox,
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
@@ -50,6 +53,7 @@ from miku_on_desk.config.settings import (
     ProviderConfig,
     ProviderName,
 )
+from miku_on_desk.face.ui.theme import RADIUS_MD, WARNING_COLOR
 
 _PROVIDER_LABELS = {
     ProviderName.ANTHROPIC: "Anthropic",
@@ -80,8 +84,15 @@ _TOOL_CHOICE_ALLOW = "总是允许"
 _TOOL_CHOICE_DENY = "总是禁止"
 _TOOL_CHOICES = [_TOOL_CHOICE_DEFAULT, _TOOL_CHOICE_ALLOW, _TOOL_CHOICE_DENY]
 
-_LIST_BORDER_LIGHT_QSS = "ListWidget{border: 1px solid rgba(0, 0, 0, 45); border-radius: 6px;}"
-_LIST_BORDER_DARK_QSS = "ListWidget{border: 1px solid rgba(255, 255, 255, 45); border-radius: 6px;}"
+_LIST_BORDER_LIGHT_QSS = (
+    f"ListWidget{{border: 1px solid rgba(0, 0, 0, 45); border-radius: {RADIUS_MD}px;}}"
+)
+_LIST_BORDER_DARK_QSS = (
+    f"ListWidget{{border: 1px solid rgba(255, 255, 255, 45); border-radius: {RADIUS_MD}px;}}"
+)
+_NUMERIC_WARNING_QSS = (
+    f"LineEdit{{border: 1px solid {WARNING_COLOR}; border-radius: {RADIUS_MD}px;}}"
+)
 
 
 def _style_list_widget(list_widget: ListWidget) -> None:
@@ -196,7 +207,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self.addSubInterface(permissions_tab, FluentIcon.CERTIFICATE, "权限")
         self.addSubInterface(self._mcp_editor, FluentIcon.CONNECT, "MCP")
         self.addSubInterface(skills_tab, FluentIcon.FOLDER, "Skills")
-        self.addSubInterface(memory_tab, FluentIcon.FOLDER, "记忆")
+        self.addSubInterface(memory_tab, FluentIcon.HISTORY, "记忆")
         self.addSubInterface(self._agent_editor, FluentIcon.PEOPLE, "Agent")
         self.addSubInterface(self._acp_editor, FluentIcon.LINK, "ACP")
         self.addSubInterface(window_tab, FluentIcon.LAYOUT, "窗口")
@@ -252,6 +263,31 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_shortcuts()
         self._collect_proactive()
         return self._settings.model_copy(deep=True)
+
+    def _add_numeric_validation(
+        self,
+        edit: LineEdit,
+        is_valid: Callable[[str], bool],
+        default: Callable[[], int | float],
+    ) -> CaptionLabel:
+        """给数字输入框接实时校验：非法输入时描边变警告色 + 提示将回退到的默认值，
+        避免用户输入被 ``_parse_int``/``_parse_float`` 静默丢弃却毫无感知。
+        """
+        warning = CaptionLabel("", self)
+        warning.setStyleSheet(f"color: {WARNING_COLOR};")
+        warning.hide()
+
+        def _on_text_changed(text: str) -> None:
+            if is_valid(text):
+                warning.hide()
+                setCustomStyleSheet(edit, "", "")
+            else:
+                warning.setText(f"将使用默认值 {default()}")
+                warning.show()
+                setCustomStyleSheet(edit, _NUMERIC_WARNING_QSS, _NUMERIC_WARNING_QSS)
+
+        edit.textChanged.connect(_on_text_changed)
+        return warning
 
     def _build_providers_tab(self) -> QWidget:
         container = QWidget()
@@ -373,7 +409,19 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         form.addRow("允许访问的目录（每行一个）", self._allowed_dirs_edit)
         form.addRow(CaptionLabel("长时间任务超时", container))
         form.addRow("spawn_agents 整体超时（秒）", self._spawn_agents_deadline_edit)
+        self._spawn_agents_deadline_warning = self._add_numeric_validation(
+            self._spawn_agents_deadline_edit,
+            _is_valid_float,
+            lambda: self._settings.long_tasks.spawn_agents_deadline_s,
+        )
+        form.addRow(self._spawn_agents_deadline_warning)
         form.addRow("acp_delegate 默认超时（秒）", self._acp_delegate_timeout_edit)
+        self._acp_delegate_timeout_warning = self._add_numeric_validation(
+            self._acp_delegate_timeout_edit,
+            _is_valid_float,
+            lambda: self._settings.long_tasks.acp_delegate_default_timeout_s,
+        )
+        form.addRow(self._acp_delegate_timeout_warning)
         return container
 
     def _load_permissions(self) -> None:
@@ -482,8 +530,20 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         form = QFormLayout(container)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("X", self._window_x_edit)
+        self._window_x_warning = self._add_numeric_validation(
+            self._window_x_edit, _is_valid_int, lambda: self._settings.window.x
+        )
+        form.addRow(self._window_x_warning)
         form.addRow("Y", self._window_y_edit)
+        self._window_y_warning = self._add_numeric_validation(
+            self._window_y_edit, _is_valid_int, lambda: self._settings.window.y
+        )
+        form.addRow(self._window_y_warning)
         form.addRow("缩放", self._window_scale_edit)
+        self._window_scale_warning = self._add_numeric_validation(
+            self._window_scale_edit, _is_valid_float, lambda: self._settings.window.scale
+        )
+        form.addRow(self._window_scale_warning)
         form.addRow(self._window_always_on_top_box)
         return container
 
@@ -526,11 +586,35 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow(self._proactive_enabled_box)
         form.addRow("最小间隔（秒）", self._proactive_min_interval_edit)
+        self._proactive_min_interval_warning = self._add_numeric_validation(
+            self._proactive_min_interval_edit,
+            _is_valid_int,
+            lambda: self._settings.proactive.min_interval_s,
+        )
+        form.addRow(self._proactive_min_interval_warning)
         form.addRow("最大间隔（秒）", self._proactive_max_interval_edit)
+        self._proactive_max_interval_warning = self._add_numeric_validation(
+            self._proactive_max_interval_edit,
+            _is_valid_int,
+            lambda: self._settings.proactive.max_interval_s,
+        )
+        form.addRow(self._proactive_max_interval_warning)
         form.addRow("空闲阈值（秒）", self._proactive_idle_threshold_edit)
+        self._proactive_idle_threshold_warning = self._add_numeric_validation(
+            self._proactive_idle_threshold_edit,
+            _is_valid_int,
+            lambda: self._settings.proactive.idle_threshold_s,
+        )
+        form.addRow(self._proactive_idle_threshold_warning)
         form.addRow("免打扰开始（HH:MM，留空不启用）", self._proactive_quiet_start_edit)
         form.addRow("免打扰结束（HH:MM，留空不启用）", self._proactive_quiet_end_edit)
         form.addRow("每日最多触发次数", self._proactive_max_daily_edit)
+        self._proactive_max_daily_warning = self._add_numeric_validation(
+            self._proactive_max_daily_edit,
+            _is_valid_int,
+            lambda: self._settings.proactive.max_daily_triggers,
+        )
+        form.addRow(self._proactive_max_daily_warning)
         form.addRow(CaptionLabel("改动需要重启 Miku 才能生效", container))
         return container
 
@@ -567,6 +651,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         settings.save(self._settings_path)
         self._settings = settings
         self.settings_saved.emit(settings)
+        InfoBar.success(title="已保存", content="设置已保存", parent=self, duration=2000)
 
 
 def _parse_int(text: str, default: int) -> int:
@@ -581,6 +666,27 @@ def _parse_float(text: str, default: float) -> float:
         return float(text.strip())
     except ValueError:
         return default
+
+
+def _is_valid_int(text: str) -> bool:
+    try:
+        int(text.strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _is_valid_float(text: str) -> bool:
+    try:
+        float(text.strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _confirm_delete(parent: QWidget, name: str) -> bool:
+    box = MessageBox("确认删除", f"确定要删除「{name}」吗？此操作不可撤销。", parent)
+    return bool(box.exec())
 
 
 class _McpServerListEditor(QWidget):
@@ -701,9 +807,12 @@ class _McpServerListEditor(QWidget):
 
     def _on_remove(self) -> None:
         row = self._list.currentRow()
-        if 0 <= row < len(self._configs):
-            del self._configs[row]
-            self._refresh_list()
+        if not (0 <= row < len(self._configs)):
+            return
+        if not _confirm_delete(self, self._configs[row].name):
+            return
+        del self._configs[row]
+        self._refresh_list()
 
 
 class _AgentProfileListEditor(QWidget):
@@ -775,9 +884,12 @@ class _AgentProfileListEditor(QWidget):
 
     def _on_remove(self) -> None:
         row = self._list.currentRow()
-        if 0 <= row < len(self._configs):
-            del self._configs[row]
-            self._refresh_list()
+        if not (0 <= row < len(self._configs)):
+            return
+        if not _confirm_delete(self, self._configs[row].name):
+            return
+        del self._configs[row]
+        self._refresh_list()
 
 
 class _AcpAgentListEditor(QWidget):
@@ -865,6 +977,9 @@ class _AcpAgentListEditor(QWidget):
 
     def _on_remove(self) -> None:
         row = self._list.currentRow()
-        if 0 <= row < len(self._configs):
-            del self._configs[row]
-            self._refresh_list()
+        if not (0 <= row < len(self._configs)):
+            return
+        if not _confirm_delete(self, self._configs[row].name):
+            return
+        del self._configs[row]
+        self._refresh_list()

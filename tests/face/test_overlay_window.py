@@ -960,3 +960,12 @@ def test_set_pet_dir_new_sprite_widget_is_visible_after_window_shown(
 
     assert window._sprite_widget.isVisibleTo(window) is True
 
+
+def test_stop_button_and_progress_label_have_non_empty_stylesheets(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    window = _make_window(tmp_path)
+
+    assert window._stop_button.styleSheet().strip() != ""
+    assert window._progress_label.styleSheet().strip() != ""
+

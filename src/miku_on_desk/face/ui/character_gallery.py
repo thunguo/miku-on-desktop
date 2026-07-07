@@ -15,7 +15,15 @@ from qfluentwidgets import CaptionLabel, PrimaryPushButton, StrongBodyLabel
 
 from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, SpriteSheetMetaError, frame_index
 from miku_on_desk.face.ui.sprite_widget import PetSpriteWidget
-from miku_on_desk.face.ui.theme import TEAL_DARK, TEAL_MAIN
+from miku_on_desk.face.ui.theme import (
+    HOVER_COLOR,
+    PRESSED_COLOR,
+    SPACING_LG,
+    SPACING_MD,
+    TEAL_DARK,
+    TEAL_MAIN,
+    border_qss,
+)
 
 _TICK_MS = 33
 _TILE_SCALE = 1.0
@@ -37,6 +45,7 @@ class CharacterStandTile(QWidget):
     ) -> None:
         super().__init__(parent)
         self._pet_dir = pet_dir
+        self._is_current = is_current
         self._state = meta.fallback_state
         self._info = meta.states.get(self._state, meta.states[meta.fallback_state])
         self._elapsed_ms = 0
@@ -47,6 +56,11 @@ class CharacterStandTile(QWidget):
         )
         layout.addWidget(self._sprite, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        if is_current:
+            badge = CaptionLabel("★ 当前角色", self)
+            badge.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(badge)
+
         name_label = StrongBodyLabel(pet_dir.name, self)
         name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(name_label)
@@ -56,10 +70,8 @@ class CharacterStandTile(QWidget):
         button.clicked.connect(lambda: self.switch_requested.emit(self._pet_dir))
         layout.addWidget(button)
 
-        if is_current:
-            self.setStyleSheet(
-                f"CharacterStandTile {{ border: 2px solid {TEAL_DARK}; border-radius: 8px; }}"
-            )
+        self._idle_style = border_qss(TEAL_DARK) if is_current else ""
+        self.setStyleSheet(f"CharacterStandTile {{ {self._idle_style} }}")
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
@@ -75,6 +87,15 @@ class CharacterStandTile(QWidget):
         )
         self._sprite.set_frame(self._state, frame)
 
+    def enterEvent(self, event: object) -> None:
+        del event
+        if not self._is_current:
+            self.setStyleSheet(f"CharacterStandTile {{ {border_qss(HOVER_COLOR)} }}")
+
+    def leaveEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"CharacterStandTile {{ {self._idle_style} }}")
+
 
 class _CreateCharacterTile(QWidget):
     """"＋ 创建新角色"格，虚线边框区分于普通角色展台。"""
@@ -84,16 +105,31 @@ class _CreateCharacterTile(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedSize(160, 200)
-        self.setStyleSheet(
-            f"_CreateCharacterTile {{ border: 2px dashed {TEAL_MAIN}; border-radius: 8px; }}"
-        )
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._idle_style = border_qss(TEAL_MAIN, style="dashed")
+        self._hover_style = border_qss(HOVER_COLOR, style="dashed")
+        self._pressed_style = border_qss(PRESSED_COLOR, style="dashed")
+        self.setStyleSheet(f"_CreateCharacterTile {{ {self._idle_style} }}")
         layout = QVBoxLayout(self)
         label = CaptionLabel("＋ 创建新角色", self)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
 
+    def enterEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CreateCharacterTile {{ {self._hover_style} }}")
+
+    def leaveEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CreateCharacterTile {{ {self._idle_style} }}")
+
+    def mousePressEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CreateCharacterTile {{ {self._pressed_style} }}")
+
     def mouseReleaseEvent(self, event: object) -> None:
         del event
+        self.setStyleSheet(f"_CreateCharacterTile {{ {self._hover_style} }}")
         self.clicked.emit()
 
 
@@ -121,6 +157,8 @@ class CharacterGalleryPanel(QWidget):
 
         self._grid_container = QWidget(scroll)
         self._grid = QGridLayout(self._grid_container)
+        self._grid.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
+        self._grid.setSpacing(SPACING_MD)
         scroll.setWidget(self._grid_container)
 
         self._reload()
@@ -147,6 +185,25 @@ class CharacterGalleryPanel(QWidget):
                 widget.deleteLater()
 
         characters = self._scan_characters()
+
+        self._empty_label = CaptionLabel(
+            "还没有角色，点击下方「＋」创建第一个角色", self._grid_container
+        )
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row_offset = 0
+        if not characters:
+            self._grid.addWidget(
+                self._empty_label,
+                0,
+                0,
+                1,
+                _COLUMNS,
+                alignment=Qt.AlignmentFlag.AlignCenter,
+            )
+            row_offset = 1
+        else:
+            self._empty_label.hide()
+
         for index, (pet_dir, meta) in enumerate(characters):
             tile = CharacterStandTile(
                 pet_dir,
@@ -155,12 +212,14 @@ class CharacterGalleryPanel(QWidget):
                 parent=self._grid_container,
             )
             tile.switch_requested.connect(self._on_switch_requested)
-            self._grid.addWidget(tile, index // _COLUMNS, index % _COLUMNS)
+            self._grid.addWidget(tile, index // _COLUMNS + row_offset, index % _COLUMNS)
 
         create_tile = _CreateCharacterTile(self._grid_container)
         create_tile.clicked.connect(self.create_requested)
         create_index = len(characters)
-        self._grid.addWidget(create_tile, create_index // _COLUMNS, create_index % _COLUMNS)
+        self._grid.addWidget(
+            create_tile, create_index // _COLUMNS + row_offset, create_index % _COLUMNS
+        )
 
     def _on_switch_requested(self, pet_dir: Path) -> None:
         self._current_pet_dir = pet_dir
