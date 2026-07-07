@@ -15,6 +15,7 @@ from miku_on_desk.face.ui.character_gallery import (
     CharacterStandTile,
     _CreateCharacterTile,
 )
+from miku_on_desk.face.ui.theme import SPACING_LG, SPACING_MD
 
 
 def _make_character_dir(parent: Path, name: str) -> Path:
@@ -152,3 +153,34 @@ def test_create_character_tile_emits_clicked_on_mouse_release(qapp: QApplication
     tile.mouseReleaseEvent(None)
 
     assert clicks == [None]
+
+
+def test_reload_shows_empty_state_message_when_no_characters(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_dir = tmp_path / "assets_pets"
+    assets_dir.mkdir()
+    panel = CharacterGalleryPanel(assets_dir, tmp_path / "current")
+    panel.show()
+
+    assert panel._empty_label.isVisibleTo(panel) is True
+    assert panel._grid.count() == 2
+
+
+def test_reload_hides_empty_state_message_when_characters_exist(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_dir = tmp_path / "assets_pets"
+    assets_dir.mkdir()
+    pet_a = _make_character_dir(assets_dir, "pet_a")
+    panel = CharacterGalleryPanel(assets_dir, pet_a)
+    panel.show()
+
+    assert panel._empty_label.isVisibleTo(panel) is False
+
+
+def test_grid_has_configured_margins_and_spacing(qapp: QApplication, tmp_path: Path) -> None:
+    panel = CharacterGalleryPanel(tmp_path / "does_not_exist", tmp_path / "current")
+
+    assert panel._grid.spacing() == SPACING_MD
+    assert panel._grid.getContentsMargins() == (SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)

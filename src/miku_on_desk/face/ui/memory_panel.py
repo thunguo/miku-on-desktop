@@ -24,8 +24,10 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon,
     FluentWindow,
+    InfoBar,
     LineEdit,
     ListWidget,
+    MessageBox,
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
@@ -164,6 +166,11 @@ def _populate_session_list(list_widget: ListWidget, system: MemorySystem) -> Non
         item = QListWidgetItem(f"{meta.title} — {meta.updated_at}")
         item.setData(_DATA_ROLE, meta.session_id)
         list_widget.addItem(item)
+
+
+def _confirm_delete(parent: QWidget, name: str) -> bool:
+    box = MessageBox("确认删除", f"确定要删除「{name}」吗？此操作不可撤销。", parent)
+    return bool(box.exec())
 
 
 class MemoryPanel(FluentWindow):  # type: ignore[misc]
@@ -340,6 +347,10 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
         selected_id = self._semantic_tree.property("selectedFactId")
         if not selected_id:
             return
+        current = self._semantic_tree.currentItem()
+        name = current.text(0) if current is not None else selected_id
+        if not _confirm_delete(self, name):
+            return
         self._system.semantic.delete_fact(selected_id)
         self._on_semantic_new_clicked()
         self._refresh_semantic()
@@ -417,6 +428,10 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
     def _on_episodic_delete_clicked(self) -> None:
         event_id = self._episodic_tree.property("selectedEventId")
         if not event_id:
+            return
+        current = self._episodic_tree.currentItem()
+        name = current.text(0) if current is not None else event_id
+        if not _confirm_delete(self, name):
             return
         self._system.episodic.delete_event(event_id)
         self._episodic_summary_edit.clear()
@@ -515,7 +530,8 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
             return
         try:
             value = json.loads(self._emotional_value_edit.toPlainText() or "null")
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            InfoBar.error(title="JSON 格式错误", content=str(exc), parent=self)
             return
         data = self._system.emotional.load_preferences()
         _set_nested(data, path_text.split("/"), value)
@@ -525,6 +541,8 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
     def _on_emotional_delete_clicked(self) -> None:
         path_text = self._emotional_path_edit.text().strip().strip("/")
         if not path_text:
+            return
+        if not _confirm_delete(self, path_text):
             return
         data = self._system.emotional.load_preferences()
         _delete_nested(data, path_text.split("/"))
@@ -606,6 +624,10 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
     def _on_base_delete_clicked(self) -> None:
         session_id = self._selected_session_id()
         if session_id is None:
+            return
+        current = self._base_session_list.currentItem()
+        name = current.text() if current is not None else session_id
+        if not _confirm_delete(self, name):
             return
         self._system.base.delete_session(session_id)
         self._refresh_base()

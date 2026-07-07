@@ -10,12 +10,21 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QListWidget, QTreeWidget, QTreeWidgetItem
+from qfluentwidgets import InfoBar, MessageBox
 
 from miku_on_desk.brain.memory.models import Fact, MemoryUnit
 from miku_on_desk.brain.memory.system import MemorySystem
 from miku_on_desk.face.ui.memory_panel import MemoryPanel
 
 _DATA_ROLE = int(Qt.ItemDataRole.UserRole)
+
+
+def _accept_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MessageBox, "exec", lambda self: 1)
+
+
+def _reject_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MessageBox, "exec", lambda self: 0)
 
 
 @pytest.fixture
@@ -179,8 +188,9 @@ def test_semantic_save_updates_existing_fact_preserves_provenance(
 
 
 def test_semantic_delete_removes_fact_and_clears_form(
-    qapp: QApplication, system: MemorySystem
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _accept_message_box(monkeypatch)
     fact_id = system.semantic.upsert_fact(_make_fact(predicate="temp", value="throwaway"))
     panel = MemoryPanel(system)
     leaf = _find_leaf_by_id(panel._semantic_tree, fact_id)
@@ -281,7 +291,10 @@ def test_episodic_save_updates_summary(qapp: QApplication, system: MemorySystem)
     assert updated.summary == "修改后的摘要"
 
 
-def test_episodic_delete_removes_event(qapp: QApplication, system: MemorySystem) -> None:
+def test_episodic_delete_removes_event(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accept_message_box(monkeypatch)
     event_id = system.episodic.append_event(
         title="临时事件", summary="待删除", occurred_at="2026-07-06T10:00:00"
     )
@@ -390,7 +403,10 @@ def test_emotional_save_creates_new_leaf(qapp: QApplication, system: MemorySyste
     assert data["habits"]["sleep_schedule"] == "喜欢熬夜"
 
 
-def test_emotional_delete_removes_leaf(qapp: QApplication, system: MemorySystem) -> None:
+def test_emotional_delete_removes_leaf(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accept_message_box(monkeypatch)
     data = system.emotional.load_preferences()
     data["habits"] = {"coffee": "喝美式"}
     system.emotional.save_preferences(data)
@@ -527,7 +543,10 @@ def test_base_reset_restores_full_session_view_after_search(
     assert "你好" in panel._base_units_view.toPlainText()
 
 
-def test_base_delete_removes_session_from_list(qapp: QApplication, system: MemorySystem) -> None:
+def test_base_delete_removes_session_from_list(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accept_message_box(monkeypatch)
     system.base.start_session("s1", "对话一")
     panel = MemoryPanel(system)
     item = _find_session_item(panel._base_session_list, "s1")
@@ -538,3 +557,85 @@ def test_base_delete_removes_session_from_list(qapp: QApplication, system: Memor
 
     assert system.base.list_sessions() == []
     assert _find_session_item(panel._base_session_list, "s1") is None
+
+
+# ── 删除确认 / 校验反馈 ─────────────────────────────────────────────────────
+
+
+def test_semantic_delete_does_nothing_when_confirmation_declined(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    fact_id = system.semantic.upsert_fact(_make_fact(predicate="temp", value="throwaway"))
+    panel = MemoryPanel(system)
+    leaf = _find_leaf_by_id(panel._semantic_tree, fact_id)
+    assert leaf is not None
+    panel._semantic_tree.setCurrentItem(leaf)
+
+    panel._on_semantic_delete_clicked()
+
+    assert system.semantic.get_fact(fact_id) is not None
+
+
+def test_episodic_delete_does_nothing_when_confirmation_declined(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    event_id = system.episodic.append_event(
+        title="临时事件", summary="待删除", occurred_at="2026-07-06T10:00:00"
+    )
+    panel = MemoryPanel(system)
+    leaf = _find_leaf_by_id(panel._episodic_tree, event_id)
+    assert leaf is not None
+    panel._episodic_tree.setCurrentItem(leaf)
+
+    panel._on_episodic_delete_clicked()
+
+    assert system.episodic.get_event(event_id) is not None
+
+
+def test_emotional_delete_does_nothing_when_confirmation_declined(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    data = system.emotional.load_preferences()
+    data["habits"] = {"coffee": "喝美式"}
+    system.emotional.save_preferences(data)
+    panel = MemoryPanel(system)
+    leaf = _find_leaf_by_id(panel._emotional_tree, "habits/coffee")
+    assert leaf is not None
+    panel._emotional_tree.setCurrentItem(leaf)
+
+    panel._on_emotional_delete_clicked()
+
+    updated = system.emotional.load_preferences()
+    assert updated["habits"]["coffee"] == "喝美式"
+
+
+def test_base_delete_does_nothing_when_confirmation_declined(
+    qapp: QApplication, system: MemorySystem, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reject_message_box(monkeypatch)
+    system.base.start_session("s1", "对话一")
+    panel = MemoryPanel(system)
+    item = _find_session_item(panel._base_session_list, "s1")
+    assert item is not None
+    panel._base_session_list.setCurrentItem(item)  # type: ignore[arg-type]
+
+    panel._on_base_delete_clicked()
+
+    assert system.base.list_sessions() != []
+
+
+def test_emotional_save_invalid_json_shows_info_bar_and_does_not_save(
+    qapp: QApplication, system: MemorySystem
+) -> None:
+    panel = MemoryPanel(system)
+    panel._emotional_path_edit.setText("habits/sleep_schedule")
+    panel._emotional_value_edit.setPlainText("{not valid json")
+
+    panel._on_emotional_save_clicked()
+
+    data = system.emotional.load_preferences()
+    assert "habits" not in data
+    assert panel.findChildren(InfoBar)

@@ -13,13 +13,15 @@ import re
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QFormLayout,
     QGraphicsOpacityEffect,
     QHBoxLayout,
+    QLabel,
     QStackedLayout,
     QVBoxLayout,
     QWidget,
@@ -28,6 +30,7 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     LineEdit,
+    ListWidget,
     PlainTextEdit,
     PrimaryPushButton,
     ProgressBar,
@@ -43,14 +46,26 @@ from miku_on_desk.character_generation import (
 from miku_on_desk.config.settings import AppSettings
 from miku_on_desk.face.character_generation_worker import CharacterGenerationWorker
 from miku_on_desk.face.pet_state import PetState
-from miku_on_desk.face.ui.theme import TEAL_DARK, TEAL_MAIN
+from miku_on_desk.face.ui.theme import (
+    ERROR_COLOR,
+    PLACEHOLDER_BG,
+    RADIUS_LG,
+    RADIUS_MD,
+    SPACING_XXS,
+    TEAL_DARK,
+    TEAL_MAIN,
+    border_qss,
+    qcolor,
+)
 
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _MODEL_CHOICES = ("gpt-image-1", "gpt-image-2")
 _TILE_SIZE = 64
+_THUMBNAIL_SIZE = 48
 _BREATH_DURATION_MS = 1200
 _RESULT_FADE_MS = 200
 _GLOW_DURATION_MS = 900
+_GLOW_FADE_MS = 300
 
 
 def _pil_to_pixmap(image: Image.Image, size: int) -> QPixmap:
@@ -74,14 +89,14 @@ class _GenerationTile(QWidget):
     def __init__(self, label_text: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(SPACING_XXS, SPACING_XXS, SPACING_XXS, SPACING_XXS)
 
         self._image_label = StrongBodyLabel("", self)
         self._image_label.setFixedSize(_TILE_SIZE, _TILE_SIZE)
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._idle_style = "background-color: #3a3a3a; border-radius: 6px;"
+        self._idle_style = f"background-color: {PLACEHOLDER_BG}; border-radius: {RADIUS_MD}px;"
         self._done_style = (
-            f"background-color: #3a3a3a; border-radius: 6px; border: 2px solid {TEAL_DARK};"
+            f"background-color: {PLACEHOLDER_BG}; {border_qss(TEAL_DARK, radius=RADIUS_MD)}"
         )
         self._image_label.setStyleSheet(self._idle_style)
         layout.addWidget(self._image_label)
@@ -157,6 +172,12 @@ class _GenerationProgressView(QWidget):
             self._state_tiles[spec.state] = tile
         layout.addLayout(tiles_row)
 
+        self._qa_list = ListWidget(self)
+        self._qa_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._qa_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._qa_list.hide()
+        layout.addWidget(self._qa_list)
+
         self._cancel_button = PushButton("取消生成", self)
         self._cancel_button.clicked.connect(self.cancel_requested)
         layout.addWidget(self._cancel_button)
@@ -167,6 +188,11 @@ class _GenerationProgressView(QWidget):
 
     def on_progress(self, progress: GenerationProgress) -> None:
         if progress.stage == "reference":
+            if progress.reference_image is not None:
+                if not self._reference_done:
+                    self._reference_tile.show_result(progress.reference_image)
+                    self._reference_done = True
+                return
             self._status_label.setText("生成基准参考图…")
             return
         if progress.stage == "strip":
@@ -201,14 +227,38 @@ class _GenerationProgressView(QWidget):
     def set_status(self, text: str) -> None:
         self._status_label.setText(text)
 
+    def show_qa_warnings(self, problems: list[str]) -> None:
+        if not problems:
+            return
+        self._status_label.setText("生成完成，但 QA 有提示：")
+        self._qa_list.clear()
+        self._qa_list.addItems(problems)
+        self._qa_list.setFixedHeight(min(120, 24 * len(problems) + 8))
+        self._qa_list.show()
+
     def finish_success(self) -> None:
         self.freeze()
         self._status_label.setText("生成完成！")
         self._progress_bar.setValue(self._progress_bar.maximum())
+        self.setStyleSheet(f"_GenerationProgressView {{ {border_qss(TEAL_MAIN)} }}")
+        QTimer.singleShot(_GLOW_DURATION_MS, self._start_glow_fade)
+
+    def _start_glow_fade(self) -> None:
+        fade = QVariantAnimation(self)
+        fade.setDuration(_GLOW_FADE_MS)
+        fade.setStartValue(255)
+        fade.setEndValue(0)
+        fade.valueChanged.connect(self._apply_glow_alpha)
+        fade.start(QVariantAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._glow_fade_anim = fade
+
+    def _apply_glow_alpha(self, alpha: int) -> None:
+        color = qcolor(TEAL_MAIN, alpha=alpha)
         self.setStyleSheet(
-            f"_GenerationProgressView {{ border: 2px solid {TEAL_MAIN}; border-radius: 8px; }}"
+            f"_GenerationProgressView {{ border: 2px solid "
+            f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha}); "
+            f"border-radius: {RADIUS_LG}px; }}"
         )
-        QTimer.singleShot(_GLOW_DURATION_MS, lambda: self.setStyleSheet(""))
 
 
 class CharacterCreationDialog(QWidget):
@@ -246,7 +296,7 @@ class CharacterCreationDialog(QWidget):
         layout = QVBoxLayout(container)
 
         self._error_label = CaptionLabel("", container)
-        self._error_label.setStyleSheet("color: #e05a5a;")
+        self._error_label.setStyleSheet(f"color: {ERROR_COLOR};")
         self._error_label.hide()
         layout.addWidget(self._error_label)
 
@@ -263,6 +313,10 @@ class CharacterCreationDialog(QWidget):
         reference_button = PushButton("选择参考图…", container)
         reference_button.clicked.connect(self._on_browse_reference_image)
         reference_row.addWidget(reference_button)
+        self._reference_thumbnail = QLabel(container)
+        self._reference_thumbnail.setFixedSize(_THUMBNAIL_SIZE, _THUMBNAIL_SIZE)
+        self._reference_thumbnail.hide()
+        reference_row.addWidget(self._reference_thumbnail)
         form.addRow("参考图", reference_row)
 
         self._description_edit = PlainTextEdit(container)
@@ -311,6 +365,15 @@ class CharacterCreationDialog(QWidget):
             return
         self._reference_image_path = Path(path_str)
         self._reference_label.setText(self._reference_image_path.name)
+        pixmap = QPixmap(str(self._reference_image_path)).scaled(
+            _THUMBNAIL_SIZE,
+            _THUMBNAIL_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        if not pixmap.isNull():
+            self._reference_thumbnail.setPixmap(pixmap)
+            self._reference_thumbnail.show()
 
     def _show_error(self, message: str) -> None:
         self._error_label.setText(message)
@@ -386,7 +449,7 @@ class CharacterCreationDialog(QWidget):
         if self._progress_view is not None:
             self._progress_view.finish_success()
             if problems:
-                self._progress_view.set_status(f"生成完成，但 QA 有提示：{'; '.join(problems)}")
+                self._progress_view.show_qa_warnings(problems)
         if output_dir is not None:
             QTimer.singleShot(_GLOW_DURATION_MS, lambda: self.character_created.emit(output_dir))
 
