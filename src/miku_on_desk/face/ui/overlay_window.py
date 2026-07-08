@@ -2,7 +2,7 @@
 
 窗口本身不知道"某个状态该播哪一帧"的细节——``PetStateMachine`` 只关心状态与时间的
 纯函数合成，``PetSpriteWidget`` 只知道怎么画一帧,真正把两者粘起来的是这里的
-``_on_animation_tick``。事件来源有两路,都最终落到同一个状态机上：Brain 的 8 种事件
+``_on_animation_tick``。事件来源有两路,都最终落到同一个状态机上：Brain 的 9 种事件
 （``bridge/events.py``）与外部 CLI 工具的 hook 通知（``face/hooks``）,分别由
 ``_on_brain_event``/``_on_hook_event`` 消费。
 """
@@ -23,6 +23,7 @@ from miku_on_desk.brain.providers.base import ToolUseBlock
 from miku_on_desk.bridge.events import (
     EXPRESS_REACTION_TOOL_NAME,
     AcpChunkReceived,
+    BrainCrashed,
     BrainEvent,
     BrainEventBus,
     CancellationGate,
@@ -56,6 +57,9 @@ logger = logging.getLogger(__name__)
 _BUBBLE_MARGIN = 10
 # 状态/帧推进定时器：30fps 对离散精灵帧切换来说绰绰有余，不需要跟随显示器刷新率。
 _ANIMATION_TICK_MS = 33
+# 流式增量（ContentDelta/AcpChunkReceived）到达频率可能远超人眼可感知的重排速度，
+# 每条都做一次整窗 setGeometry 会造成气泡明显抖动/闪烁——合并到与动画同频的节流窗口内。
+_REFLOW_THROTTLE_MS = 33
 # Stop/StopFailure 代表一整轮外部会话结束，除了播放一次性反应外还要把常驻基线收回 IDLE，
 # 与 Brain 侧 LoopFinished 的处理方式对称——不能只靠 resolve_transition 的查表结果，
 # 因为查表只知道"这个事件对应哪个 transient"，不知道"这个事件还标志着一轮交互彻底结束"。
@@ -189,6 +193,8 @@ class OverlayWindow(QWidget):
         self._animation_timer.timeout.connect(self._on_animation_tick)
         self._animation_timer.start(_ANIMATION_TICK_MS)
 
+        self._reflow_pending = False
+
         self._confirmation_gate = confirmation_gate
         self._pending_confirmation_request_id: str | None = None
         self._tool_use_names: dict[str, str] = {}
@@ -223,6 +229,20 @@ class OverlayWindow(QWidget):
         )
         self._sprite_widget.move(0, reserved)
         self._position_bubble()
+
+    def _schedule_reflow(self) -> None:
+        """流式增量高频到达时的节流入口：文字已经在调用方立即追加进气泡，这里只把
+        `_reflow_bubble` 的整窗 `setGeometry` 合并到每 `_REFLOW_THROTTLE_MS` 至多一次，
+        避免连续多条 delta 造成明显的窗口抖动/闪烁。
+        """
+        if self._reflow_pending:
+            return
+        self._reflow_pending = True
+        QTimer.singleShot(_REFLOW_THROTTLE_MS, self._do_scheduled_reflow)
+
+    def _do_scheduled_reflow(self) -> None:
+        self._reflow_pending = False
+        self._reflow_bubble()
 
     def _elapsed(self) -> float:
         return time.monotonic() - self._start_time
@@ -271,7 +291,7 @@ class OverlayWindow(QWidget):
         if isinstance(event, ContentDelta):
             self._acp_active_agent = None
             self._bubble.append_speech(event.text)
-            self._reflow_bubble()
+            self._schedule_reflow()
             self._state_machine.set_baseline_state(PetState.TALKING, t=t)
             self._show_stop_button()
         elif isinstance(event, ThinkingDelta):
@@ -282,7 +302,7 @@ class OverlayWindow(QWidget):
                 self._acp_active_agent = event.agent
                 self._bubble.append_speech(f"\n[{event.agent}] ")
             self._bubble.append_speech(event.text)
-            self._reflow_bubble()
+            self._schedule_reflow()
             self._show_stop_button()
         elif isinstance(event, ToolUseStarted):
             self._tool_use_names[event.tool_use.id] = event.tool_use.name
@@ -301,6 +321,21 @@ class OverlayWindow(QWidget):
             if event.result.tool_use_id == self._pending_click_tool_use_id:
                 self._clear_pending_click_target()
         elif isinstance(event, ConfirmationRequested):
+            if (
+                self._pending_confirmation_request_id is not None
+                and self._pending_confirmation_request_id != event.request_id
+                and self._confirmation_gate is not None
+            ):
+                # 罕见边界情况：acp_delegate/spawn_agents 的并发子代理可能各自触发一次
+                # 确认请求——气泡一次只能追踪一个 request_id，旧请求若被静默覆盖，其
+                # Future 永远等不到 resolve，会让对应的 Brain 任务永久挂起。保守起见
+                # 直接拒绝旧请求，避免协程悬挂/网关泄漏，同时记录日志便于排查。
+                logger.warning(
+                    "收到新的确认请求 %s，但前一个请求 %s 尚未被处理，已自动拒绝前一个请求",
+                    event.request_id,
+                    self._pending_confirmation_request_id,
+                )
+                self._confirmation_gate.resolve(self._pending_confirmation_request_id, False)
             self._pending_confirmation_request_id = event.request_id
             self._state_machine.set_baseline_state(PetState.CONFIRMATION_PENDING, t=t)
             self._bubble.show_confirmation(event.reason or f'是否允许 "{event.tool_use.name}"？')
@@ -322,6 +357,16 @@ class OverlayWindow(QWidget):
             self._stop_long_task_progress()
             self._stop_button.hide()
             self._stop_button.setEnabled(True)
+            self._clear_pending_click_target()
+        elif isinstance(event, BrainCrashed):
+            self._acp_active_agent = None
+            self._state_machine.set_baseline_state(PetState.ERROR, t=t)
+            self._bubble.show_speech(
+                f"呀……我的大脑好像出问题停止了：\n{event.error}\n（需要重启应用才能恢复）"
+            )
+            self._reflow_bubble()
+            self._stop_long_task_progress()
+            self._stop_button.hide()
             self._clear_pending_click_target()
 
     def _show_stop_button(self) -> None:
@@ -403,6 +448,9 @@ class OverlayWindow(QWidget):
 
         新建的子 widget 在本窗口早已 ``show()`` 过之后才创建，不会被纳入 Qt 那次一次性
         的显示级联，默认处于隐藏状态——必须显式 ``show()``，否则精灵会"切换成功但看不见"。
+
+        ``deleteLater()`` 是异步删除，真正回收发生在下一次事件循环迭代——如果不显式
+        ``hide()`` 旧 widget，两个精灵会在这段窗口期内重叠可见，造成一帧切换闪烁。
         """
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
         sheet_path = pet_dir / "spritesheet.png"
@@ -410,6 +458,7 @@ class OverlayWindow(QWidget):
         self._sprite_widget = PetSpriteWidget(meta, sheet_path, scale=self._scale, parent=self)
         self._sprite_widget.move(old_sprite_widget.pos())
         self._sprite_widget.show()
+        old_sprite_widget.hide()
         old_sprite_widget.deleteLater()
         self._meta = meta
         self._state_machine = PetStateMachine()
@@ -438,10 +487,21 @@ class OverlayWindow(QWidget):
         menu.popup_at(global_pos)
 
     def _show_chat_popup(self, global_pos: QPoint) -> None:
-        assert self._actions is not None
         popup = ChatPopup(self)
-        popup.text_submitted.connect(self._actions.talk)
+        popup.text_submitted.connect(self._route_chat_text)
         popup.popup_at(global_pos)
+
+    def _route_chat_text(self, text: str) -> None:
+        """停止按钮可见即代表当前有 loop 在跑：忙碌时插话入队，空闲时照常直接开始新一轮。
+
+        用 ``isVisibleTo(self)`` 而不是 ``isVisible()``——后者还会级联检查顶层窗口自身
+        是否 ``show()`` 过，测试里构造的窗口通常不会真的 show，会导致误判为"一直空闲"。
+        """
+        assert self._actions is not None
+        if self._stop_button.isVisibleTo(self):
+            self._actions.queue_message(text)
+        else:
+            self._actions.talk(text)
 
     def resizeEvent(self, event: object) -> None:
         self._position_bubble()

@@ -184,3 +184,48 @@ def test_grid_has_configured_margins_and_spacing(qapp: QApplication, tmp_path: P
 
     assert panel._grid.spacing() == SPACING_MD
     assert panel._grid.getContentsMargins() == (SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
+
+
+# ── 可见性驱动的 tick 暂停（阶段 F） ────────────────────────────────────────
+
+
+def test_character_stand_tile_timer_not_running_before_shown(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    pet_dir = _make_character_dir(tmp_path, "pet_a")
+    meta = SpriteSheetMeta.load(pet_dir / "pet.json")
+    tile = CharacterStandTile(pet_dir, meta, is_current=False)
+
+    assert tile._timer.isActive() is False
+
+
+def test_character_stand_tile_show_starts_timer_and_hide_stops_it(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    pet_dir = _make_character_dir(tmp_path, "pet_a")
+    meta = SpriteSheetMeta.load(pet_dir / "pet.json")
+    tile = CharacterStandTile(pet_dir, meta, is_current=False)
+
+    tile.show()
+    assert tile._timer.isActive() is True
+
+    tile.hide()
+    assert tile._timer.isActive() is False
+
+
+def test_gallery_panel_hide_stops_all_tile_timers(qapp: QApplication, tmp_path: Path) -> None:
+    """画廊面板整体关闭/隐藏时，Qt 会向所有可见子 widget 级联发出隐藏事件——展台的
+    动画 tick 应该跟着暂停，避免面板关闭后仍在后台空转消耗 CPU。
+    """
+    assets_dir = tmp_path / "assets_pets"
+    assets_dir.mkdir()
+    pet_a = _make_character_dir(assets_dir, "pet_a")
+    panel = CharacterGalleryPanel(assets_dir, pet_a)
+    panel.show()
+    tile = panel.findChild(CharacterStandTile)
+    assert tile is not None
+    assert tile._timer.isActive() is True
+
+    panel.hide()
+
+    assert tile._timer.isActive() is False

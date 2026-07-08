@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from miku_on_desk.brain.secrets.vault import SecretVault
 from miku_on_desk.config.settings import (
     AcpAgentConfig,
     AppSettings,
@@ -13,13 +14,20 @@ from miku_on_desk.config.settings import (
     LongTaskConfig,
     McpServerConfig,
     McpTransport,
+    MemoryTuningConfig,
     ModelTier,
     PersonaConfig,
     ProactiveConfig,
     ProviderConfig,
     ProviderName,
     ShortcutsConfig,
+    load_settings_with_vault,
+    save_settings_with_vault,
 )
+
+
+def _make_vault(tmp_path: Path) -> SecretVault:
+    return SecretVault(tmp_path / "secrets.db", tmp_path / "secrets.key")
 
 
 def test_provider_config_enabled_requires_both_api_key_and_models() -> None:
@@ -316,3 +324,99 @@ def test_app_settings_long_tasks_roundtrip_through_save_and_load(tmp_path: Path)
     loaded = AppSettings.load(path)
 
     assert loaded.long_tasks == settings.long_tasks
+
+
+def test_memory_tuning_config_defaults_match_original_hardcoded_constants() -> None:
+    tuning = MemoryTuningConfig()
+
+    assert tuning.retrieval_min_confidence == 0.7
+    assert tuning.base_similarity_threshold == 0.80
+    assert tuning.emotional_confidence_threshold == 0.75
+    assert tuning.compaction_token_threshold == 60_000
+    assert tuning.compaction_keep_recent == 6
+    assert tuning.screen_match_threshold == 0.6
+
+
+def test_app_settings_memory_tuning_roundtrip_through_save_and_load(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.memory_tuning = MemoryTuningConfig(
+        retrieval_min_confidence=0.5,
+        base_similarity_threshold=0.9,
+        emotional_confidence_threshold=0.6,
+        compaction_token_threshold=30_000,
+        compaction_keep_recent=3,
+        screen_match_threshold=0.8,
+    )
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded.memory_tuning == settings.memory_tuning
+
+
+def test_load_settings_with_vault_migrates_legacy_plaintext_api_keys(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    legacy = AppSettings()
+    legacy.model_router.anthropic = ProviderConfig(
+        api_key="sk-ant-legacy", models={ModelTier.MEDIUM: "claude-sonnet-4-6"}
+    )
+    legacy.image_generation = ImageGenerationConfig(api_key="sk-image-legacy")
+    legacy.save(settings_path)
+
+    vault = _make_vault(tmp_path)
+    try:
+        loaded = load_settings_with_vault(settings_path, vault)
+
+        assert loaded.model_router.anthropic.api_key == "sk-ant-legacy"
+        assert loaded.image_generation.api_key == "sk-image-legacy"
+
+        on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert on_disk["model_router"]["anthropic"]["api_key"].startswith("vault-ref:")
+        assert on_disk["image_generation"]["api_key"].startswith("vault-ref:")
+        assert "sk-ant-legacy" not in settings_path.read_text(encoding="utf-8")
+        assert "sk-image-legacy" not in settings_path.read_text(encoding="utf-8")
+    finally:
+        vault.close()
+
+
+def test_save_settings_with_vault_stores_plaintext_in_vault_not_on_disk(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.model_router.qwen = ProviderConfig(
+        api_key="sk-qwen-plain", models={ModelTier.FAST: "qwen3-vl-plus"}
+    )
+
+    vault = _make_vault(tmp_path)
+    try:
+        save_settings_with_vault(settings, settings_path, vault)
+
+        assert settings.model_router.qwen.api_key == "sk-qwen-plain"
+
+        on_disk_text = settings_path.read_text(encoding="utf-8")
+        assert "sk-qwen-plain" not in on_disk_text
+        on_disk = json.loads(on_disk_text)
+        vault_ref = on_disk["model_router"]["qwen"]["api_key"]
+        assert vault_ref.startswith("vault-ref:")
+        assert vault.get(vault_ref.removeprefix("vault-ref:")) == "sk-qwen-plain"
+    finally:
+        vault.close()
+
+
+def test_load_settings_with_vault_roundtrips_after_save(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.model_router.openai = ProviderConfig(
+        api_key="sk-openai-plain", models={ModelTier.HEAVY: "gpt-5"}
+    )
+
+    vault = _make_vault(tmp_path)
+    try:
+        save_settings_with_vault(settings, settings_path, vault)
+        reloaded = load_settings_with_vault(settings_path, vault)
+
+        assert reloaded.model_router.openai.api_key == "sk-openai-plain"
+        on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert on_disk["model_router"]["openai"]["api_key"].startswith("vault-ref:")
+    finally:
+        vault.close()

@@ -9,8 +9,13 @@
 字段，从不包含 headers/url；日志里也从不整个序列化 config（`connect()` 的 `logger.info`
 只插值 name 和工具数量）。headers 从不出现在任何暴露面上，因此不需要额外脱敏代码。
 
-每个已注册工具的 policy 用 `ToolPolicySpec()` 默认值，不额外发明"外部工具默认要确认"这类
-没有实际需求支撑的策略。
+外部 MCP server 的工具对我们来说是黑盒——不像 `builtin/` 工具那样能在注册时手写一个精确的
+`ToolPolicySpec`，所以 `_infer_policy_spec()` 按 `inputSchema` 里的参数名做启发式推断：
+命中 `path`/`file_path`/`filepath` 就接入路径沙箱，命中 `command`/`cmd` 就接入危险命令
+检测，且默认 `requires_confirmation=True`——比 `ToolPolicySpec()` 的默认值更保守，呼应
+`policy.py` 里"结构性边界优先于信任层"的公理：MCP 桥接工具不例外，不会因为"来自 MCP"就
+默认更被信任。`McpServerConfig.trusted` 只豁免这里的 `requires_confirmation`，路径沙箱/
+先读后改这两条结构性检查始终生效，由 `PolicyEngine.evaluate()` 统一把关。
 """
 
 from __future__ import annotations
@@ -21,8 +26,11 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from mcp import types
+
 from miku_on_desk.brain.mcp.client import MCPServerConnection, MCPServerStatus, MCPToolError
 from miku_on_desk.brain.providers.base import ToolDefinition
+from miku_on_desk.brain.tools.policy import ToolPolicySpec
 from miku_on_desk.brain.tools.registry import (
     ToolExecutionError,
     ToolHandler,
@@ -34,6 +42,21 @@ from miku_on_desk.config.settings import McpServerConfig
 logger = logging.getLogger(__name__)
 
 _EMPTY_OBJECT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
+_PATH_PARAM_NAMES = frozenset({"path", "file_path", "filepath"})
+_COMMAND_PARAM_NAMES = frozenset({"command", "cmd"})
+
+
+def _infer_policy_spec(tool: types.Tool, *, trusted: bool) -> ToolPolicySpec:
+    """按 `tool.inputSchema` 里的参数名推断这个未知工具要接入哪些结构性防御闸门。"""
+    properties: dict[str, Any] = (tool.inputSchema or {}).get("properties", {})
+    path_arg = next((name for name in properties if name in _PATH_PARAM_NAMES), None)
+    command_arg = next((name for name in properties if name in _COMMAND_PARAM_NAMES), None)
+    return ToolPolicySpec(
+        requires_confirmation=not trusted,
+        confirm_reason=f'MCP 工具 "{tool.name}" 需要用户确认后才能执行。',
+        command_arg=command_arg,
+        path_arg=path_arg,
+    )
 
 
 def _sanitize(name: str) -> str:
@@ -115,6 +138,7 @@ class MCPHost:
                         input_schema=tool.inputSchema or _EMPTY_OBJECT_SCHEMA,
                     ),
                     handler=_make_handler(connection, tool.name),
+                    policy_spec=_infer_policy_spec(tool, trusted=connection.trusted),
                 )
             )
 

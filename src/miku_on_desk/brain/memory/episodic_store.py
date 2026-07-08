@@ -1,23 +1,25 @@
-"""`episodic` 层：按月 Markdown 文件存储的事件链，格式对齐设计文档 §4.1 worked example。
+"""`episodic` 层：按月 Markdown 文件存储的事件链。
 
-显式偏离设计文档的两点（在计划文档「与设计文档的显式偏离」一节之外，属本模块局部实现细节，
-一并记录在这里）：
+两点局部实现细节：
 1. 不做 `## Week NN (...)` 周分组——纯展示性分组，对检索/溯源没有功能价值，反而让块解析
    复杂化，直接把所有 `### [E:NNN]` 事件块平铺在月标题下。
-2. `Episode` 在设计文档 schema 之外新增了 `session_id`/`model` 两个可选字段（渲染为
-   `**来源会话**`/`**生成模型**` 行，缺省不渲染），用于 `compaction.py` 把压缩摘要落盘时
-   保留"这条事件来自哪个会话/由哪个模型生成"的可追溯性——跟 `Fact.pinned` 是同一类"为保留
-   现有能力而做的针对性加字段"处理。
+2. `Episode` 新增了 `session_id`/`model` 两个可选字段（渲染为 `**来源会话**`/`**生成模型**`
+   行，缺省不渲染），用于 `compaction.py` 把压缩摘要落盘时保留"这条事件来自哪个会话/由哪个
+   模型生成"的可追溯性——跟 `Fact.pinned` 是同一类"为保留现有能力而做的针对性加字段"处理。
 
-事件链（`事件链`/`关联事件`）在设计文档里是叙事性自由文本，本次没有任何编排逻辑会结构化生成
-或消费这两个子字段（`memory_panel.py` 情景标签页也明确不做这两个子字段的编辑表单），因此
-建模成 `list[str]`（每行一条），原样落盘/读回，不做进一步语义解析。
+事件链（`事件链`/`关联事件`）是叙事性自由文本，没有任何编排逻辑会结构化生成或消费这两个子
+字段（`memory_panel.py` 情景标签页也明确不做这两个子字段的编辑表单），因此建模成
+`list[str]`（每行一条），原样落盘/读回，不做进一步语义解析。
+
+`MemorySystem` 会被 UI 线程和 Brain 线程共享同一个实例，公开方法内部用
+`threading.RLock()` 互斥，理由同 `base_store.py` 模块文档。
 """
 
 from __future__ import annotations
 
 import os
 import re
+import threading
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -162,6 +164,7 @@ class EpisodicStore:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._root.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
     def _month_path(self, month: str) -> Path:
         year = month[:4]
@@ -220,53 +223,57 @@ class EpisodicStore:
         session_id: str | None = None,
         model: str | None = None,
     ) -> str:
-        event_id = self._next_event_id()
-        month = occurred_at[:7]
-        episode = Episode(
-            id=event_id,
-            month=month,
-            title=title,
-            occurred_at=occurred_at,
-            source_units=list(source_units or []),
-            summary=summary,
-            emotion_tag=emotion_tag,
-            participants=list(participants or []),
-            event_chain=list(event_chain or []),
-            related_events=list(related_events or []),
-            session_id=session_id,
-            model=model,
-        )
-        path = self._month_path(month)
-        _metadata, blocks = self._read_month(path)
-        blocks.append(_render_event_block(episode).splitlines())
-        self._write_month(path, month, blocks, last_compacted=occurred_at)
-        self._rebuild_index()
-        return event_id
+        with self._lock:
+            event_id = self._next_event_id()
+            month = occurred_at[:7]
+            episode = Episode(
+                id=event_id,
+                month=month,
+                title=title,
+                occurred_at=occurred_at,
+                source_units=list(source_units or []),
+                summary=summary,
+                emotion_tag=emotion_tag,
+                participants=list(participants or []),
+                event_chain=list(event_chain or []),
+                related_events=list(related_events or []),
+                session_id=session_id,
+                model=model,
+            )
+            path = self._month_path(month)
+            _metadata, blocks = self._read_month(path)
+            blocks.append(_render_event_block(episode).splitlines())
+            self._write_month(path, month, blocks, last_compacted=occurred_at)
+            self._rebuild_index()
+            return event_id
 
     def get_event(self, event_id: str) -> Episode | None:
-        location = self._find_location(event_id)
-        if location is None:
-            return None
-        path, blocks, index = location
-        month = path.stem
-        return _parse_event_block(blocks[index], month)
+        with self._lock:
+            location = self._find_location(event_id)
+            if location is None:
+                return None
+            path, blocks, index = location
+            month = path.stem
+            return _parse_event_block(blocks[index], month)
 
     def list_events(self, *, month: str | None = None, limit: int | None = None) -> list[Episode]:
-        if month is not None:
-            _metadata, blocks = self._read_month(self._month_path(month))
-            episodes = [_parse_event_block(block, month) for block in blocks]
-        else:
-            episodes = []
-            for path in self._all_month_paths():
-                _metadata, blocks = self._read_month(path)
-                episodes.extend(_parse_event_block(block, path.stem) for block in blocks)
+        with self._lock:
+            if month is not None:
+                _metadata, blocks = self._read_month(self._month_path(month))
+                episodes = [_parse_event_block(block, month) for block in blocks]
+            else:
+                episodes = []
+                for path in self._all_month_paths():
+                    _metadata, blocks = self._read_month(path)
+                    episodes.extend(_parse_event_block(block, path.stem) for block in blocks)
         episodes.sort(key=lambda episode: episode.occurred_at)
         if limit is not None:
             episodes = episodes[-limit:]
         return episodes
 
     def list_months(self) -> list[str]:
-        return sorted(path.stem for path in self._all_month_paths())
+        with self._lock:
+            return sorted(path.stem for path in self._all_month_paths())
 
     def search(self, query: str, *, limit: int = 20) -> list[Episode]:
         needle = query.strip().lower()
@@ -284,25 +291,27 @@ class EpisodicStore:
         return matches[:limit]
 
     def update_summary(self, event_id: str, summary: str) -> None:
-        location = self._find_location(event_id)
-        if location is None:
-            return
-        path, blocks, index = location
-        month = path.stem
-        episode = replace(_parse_event_block(blocks[index], month), summary=summary)
-        blocks[index] = _render_event_block(episode).splitlines()
-        self._write_month(path, month, blocks, last_compacted=episode.occurred_at)
-        self._rebuild_index()
+        with self._lock:
+            location = self._find_location(event_id)
+            if location is None:
+                return
+            path, blocks, index = location
+            month = path.stem
+            episode = replace(_parse_event_block(blocks[index], month), summary=summary)
+            blocks[index] = _render_event_block(episode).splitlines()
+            self._write_month(path, month, blocks, last_compacted=episode.occurred_at)
+            self._rebuild_index()
 
     def delete_event(self, event_id: str) -> None:
-        location = self._find_location(event_id)
-        if location is None:
-            return
-        path, blocks, index = location
-        month = path.stem
-        del blocks[index]
-        self._write_month(path, month, blocks, last_compacted=month)
-        self._rebuild_index()
+        with self._lock:
+            location = self._find_location(event_id)
+            if location is None:
+                return
+            path, blocks, index = location
+            month = path.stem
+            del blocks[index]
+            self._write_month(path, month, blocks, last_compacted=month)
+            self._rebuild_index()
 
     def _rebuild_index(self) -> None:
         episodes = self.list_events()
