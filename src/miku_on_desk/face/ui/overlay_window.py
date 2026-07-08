@@ -46,6 +46,7 @@ from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, frame_index
 from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.radial_menu import RadialMenu
 from miku_on_desk.face.ui.speech_bubble import SpeechBubble
+from miku_on_desk.face.ui.speech_controller import SpeechController
 from miku_on_desk.face.ui.sprite_widget import PetSpriteWidget
 from miku_on_desk.face.ui.theme import HOVER_COLOR, PINK_ACCENT, PRESSED_COLOR, RADIUS_SM, TEAL_DARK
 
@@ -135,6 +136,7 @@ class OverlayWindow(QWidget):
         actions: PetActions | None = None,
         confirm_yes_shortcut: str = "Ctrl+Shift+Y",
         confirm_no_shortcut: str = "Ctrl+Shift+N",
+        speech_controller: SpeechController | None = None,
     ) -> None:
         super().__init__()
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
@@ -196,6 +198,7 @@ class OverlayWindow(QWidget):
         self._reflow_pending = False
 
         self._confirmation_gate = confirmation_gate
+        self._speech_controller = speech_controller
         self._pending_confirmation_request_id: str | None = None
         self._tool_use_names: dict[str, str] = {}
         self._acp_active_agent: str | None = None
@@ -291,6 +294,8 @@ class OverlayWindow(QWidget):
         if isinstance(event, ContentDelta):
             self._acp_active_agent = None
             self._bubble.append_speech(event.text)
+            if self._speech_controller is not None:
+                self._speech_controller.feed(event.text)
             self._schedule_reflow()
             self._state_machine.set_baseline_state(PetState.TALKING, t=t)
             self._show_stop_button()
@@ -348,6 +353,8 @@ class OverlayWindow(QWidget):
             self._state_machine.trigger_transient(_REACTION_STATE_MAP[event.kind], t=t)
         elif isinstance(event, LoopFinished):
             self._acp_active_agent = None
+            if self._speech_controller is not None:
+                self._speech_controller.flush()
             if event.result.error is not None:
                 self._state_machine.trigger_transient(PetState.ERROR, t=t)
             self._state_machine.set_baseline_state(PetState.IDLE, t=t)
@@ -360,6 +367,8 @@ class OverlayWindow(QWidget):
             self._clear_pending_click_target()
         elif isinstance(event, BrainCrashed):
             self._acp_active_agent = None
+            if self._speech_controller is not None:
+                self._speech_controller.stop()
             self._state_machine.set_baseline_state(PetState.ERROR, t=t)
             self._bubble.show_speech(
                 f"呀……我的大脑好像出问题停止了：\n{event.error}\n（需要重启应用才能恢复）"
@@ -470,6 +479,8 @@ class OverlayWindow(QWidget):
     def _on_stop_clicked(self) -> None:
         if self._cancellation_gate is not None:
             self._cancellation_gate.request_stop()
+        if self._speech_controller is not None:
+            self._speech_controller.stop()
         self._stop_button.setEnabled(False)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:

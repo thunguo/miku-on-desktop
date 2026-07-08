@@ -53,7 +53,7 @@ def test_provider_fields_load_from_settings(qapp: QApplication) -> None:
 def test_all_tabs_registered_as_fluent_sub_interfaces(qapp: QApplication) -> None:
     panel = SettingsPanel(AppSettings(), Path("unused.json"))
 
-    assert panel.stackedWidget.count() == 12
+    assert panel.stackedWidget.count() == 13
 
 
 def test_all_tabs_have_nondegenerate_size_after_switching_while_visible(

@@ -83,6 +83,7 @@ from miku_on_desk.config import (
     ModelTier,
     PersonaConfig,
     ProviderName,
+    TTSConfig,
     default_settings_path,
     load_settings_with_vault,
 )
@@ -96,6 +97,7 @@ from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.memory_panel import MemoryPanel
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.face.ui.settings_panel import SettingsPanel
+from miku_on_desk.face.ui.speech_controller import SpeechController
 from miku_on_desk.face.ui.theme import apply_fluent_theme
 from miku_on_desk.hands_eyes.backend import create_platform_backend
 
@@ -141,6 +143,19 @@ def _build_providers(config: ModelRouterConfig) -> dict[ProviderName, Provider]:
         else:
             providers[name] = GeminiProvider(api_key=api_key, base_url=provider_config.base_url)
     return providers
+
+
+def _build_speech_controller(tts: TTSConfig) -> SpeechController | None:
+    """按配置构建语音控制器；关闭时返回 None，初始化失败时降级为无语音（不拖垮启动）。"""
+    if not tts.enabled:
+        return None
+    try:
+        from miku_on_desk.brain.tts.factory import create_tts_provider
+
+        return SpeechController(create_tts_provider(tts))
+    except Exception:
+        logger.exception("TTS 初始化失败（provider=%s），已禁用语音", tts.provider.value)
+        return None
 
 
 def _format_agents_summary(profiles: list[AgentProfile]) -> str:
@@ -732,6 +747,8 @@ def main() -> None:
             logger.warning("Brain 线程在 10 秒内未能正常退出，强制关闭应用")
         if hook_server is not None:
             hook_server.stop()
+        if speech_controller is not None:
+            speech_controller.close()
         vault.close()
         app.quit()
 
@@ -752,6 +769,8 @@ def main() -> None:
         quit=_on_quit,
     )
 
+    speech_controller = _build_speech_controller(settings.tts)
+
     pet_dir = settings.window.pet_dir or _default_pet_dir()
     window = OverlayWindow(
         pet_dir,
@@ -767,6 +786,7 @@ def main() -> None:
         actions=actions,
         confirm_yes_shortcut=settings.shortcuts.confirm_yes,
         confirm_no_shortcut=settings.shortcuts.confirm_no,
+        speech_controller=speech_controller,
     )
     window.show()
 
