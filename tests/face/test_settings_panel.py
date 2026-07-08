@@ -12,6 +12,7 @@ from miku_on_desk.config.settings import (
     AcpAgentConfig,
     AgentProfileConfig,
     AppSettings,
+    ComputerUseConfig,
     McpServerConfig,
     McpTransport,
     ModelTier,
@@ -455,6 +456,26 @@ def test_current_settings_collects_empty_quiet_hours_as_none(qapp: QApplication)
     proactive = panel.current_settings().proactive
     assert proactive.quiet_hours_start is None
     assert proactive.quiet_hours_end is None
+
+
+def test_computer_use_fields_load_from_settings(qapp: QApplication) -> None:
+    settings = AppSettings()
+    settings.computer_use = ComputerUseConfig(enabled=True, settle_delay_s=1.5)
+
+    panel = SettingsPanel(settings, Path("unused.json"))
+
+    assert panel._computer_use_enabled_box.isChecked() is True
+    assert panel._computer_use_settle_delay_edit.text() == "1.5"
+
+
+def test_current_settings_collects_edited_computer_use_fields(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(), Path("unused.json"))
+
+    panel._computer_use_enabled_box.setChecked(True)
+    panel._computer_use_settle_delay_edit.setText("1.5")
+
+    computer_use = panel.current_settings().computer_use
+    assert computer_use == ComputerUseConfig(enabled=True, settle_delay_s=1.5)
 
 
 def test_shortcuts_tab_defaults_to_shift_ctrl_y_and_n(qapp: QApplication) -> None:

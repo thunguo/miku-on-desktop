@@ -235,6 +235,14 @@ class ProactiveConfig(BaseModel):
     max_daily_triggers: int = 10
 
 
+class ComputerUseConfig(BaseModel):
+    """`computer_input` 工具的自动结算与焦点漂移检测闭环。默认关闭：涉及工具执行后自动
+    介入这一产品行为变化，需要用户主动打开。"""
+
+    enabled: bool = False
+    settle_delay_s: float = 0.3
+
+
 class HookServerConfig(BaseModel):
     """本地 hook sidecar（接收 Claude Code 等外部 CLI 工具的通知）的监听设置。
 
@@ -276,6 +284,7 @@ class AppSettings(BaseModel):
     long_tasks: LongTaskConfig = Field(default_factory=LongTaskConfig)
     loop_behavior: LoopBehaviorConfig = Field(default_factory=LoopBehaviorConfig)
     memory_tuning: MemoryTuningConfig = Field(default_factory=MemoryTuningConfig)
+    computer_use: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
 
     @classmethod
     def load(cls, path: Path) -> AppSettings:

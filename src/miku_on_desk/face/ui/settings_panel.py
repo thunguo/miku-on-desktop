@@ -196,6 +196,8 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._deadline_edit = LineEdit(self)
         self._time_caution_remaining_edit = LineEdit(self)
         self._time_critical_remaining_edit = LineEdit(self)
+        self._computer_use_enabled_box = CheckBox("启用 Computer Use 闭环", self)
+        self._computer_use_settle_delay_edit = LineEdit(self)
 
         self._mcp_editor = _McpServerListEditor(self._settings.mcp_servers, self)
         self._agent_editor = _AgentProfileListEditor(self._settings.agent_profiles, self)
@@ -246,6 +248,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._load_shortcuts()
         self._load_proactive()
         self._load_advanced()
+        self._load_computer_use()
 
         save_button = PrimaryPushButton("保存", self)
         save_button.clicked.connect(self._on_save_clicked)
@@ -288,6 +291,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_shortcuts()
         self._collect_proactive()
         self._collect_advanced()
+        self._collect_computer_use()
         return self._settings.model_copy(deep=True)
 
     def _add_numeric_validation(
@@ -692,6 +696,21 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         hook_card.viewLayout.addWidget(hook_container)
         layout.addWidget(hook_card)
 
+        computer_use_card = HeaderCardWidget("Computer Use 闭环", self)
+        computer_use_container = QWidget(computer_use_card)
+        computer_use_form = QFormLayout(computer_use_container)
+        computer_use_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        computer_use_form.addRow(self._computer_use_enabled_box)
+        computer_use_form.addRow("结算延迟（秒）", self._computer_use_settle_delay_edit)
+        self._computer_use_settle_delay_warning = self._add_numeric_validation(
+            self._computer_use_settle_delay_edit,
+            _is_valid_float,
+            lambda: self._settings.computer_use.settle_delay_s,
+        )
+        computer_use_form.addRow(self._computer_use_settle_delay_warning)
+        computer_use_card.viewLayout.addWidget(computer_use_container)
+        layout.addWidget(computer_use_card)
+
         loop_card = HeaderCardWidget("AI 循环参数", self)
         loop_container = QWidget(loop_card)
         loop_form = QFormLayout(loop_container)
@@ -823,6 +842,18 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         loop_behavior.time_critical_remaining_s = _parse_float(
             self._time_critical_remaining_edit.text(),
             default=loop_behavior.time_critical_remaining_s,
+        )
+
+    def _load_computer_use(self) -> None:
+        computer_use = self._settings.computer_use
+        self._computer_use_enabled_box.setChecked(computer_use.enabled)
+        self._computer_use_settle_delay_edit.setText(str(computer_use.settle_delay_s))
+
+    def _collect_computer_use(self) -> None:
+        computer_use = self._settings.computer_use
+        computer_use.enabled = self._computer_use_enabled_box.isChecked()
+        computer_use.settle_delay_s = _parse_float(
+            self._computer_use_settle_delay_edit.text(), default=computer_use.settle_delay_s
         )
 
     def _on_save_clicked(self) -> None:
