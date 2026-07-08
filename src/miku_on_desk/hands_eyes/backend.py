@@ -16,6 +16,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import psutil
 
@@ -32,6 +33,18 @@ class UIElement:
     center_y: int
     width: int
     height: int
+
+
+def element_to_dict(element: UIElement) -> dict[str, Any]:
+    return {
+        "role": element.role,
+        "text": element.label,
+        "center_x": element.center_x,
+        "center_y": element.center_y,
+        "width": element.width,
+        "height": element.height,
+        "source": "accessibility",
+    }
 
 
 @dataclass(frozen=True)
