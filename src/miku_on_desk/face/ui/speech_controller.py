@@ -24,6 +24,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from miku_on_desk.brain.tts.base import TTSProvider
 from miku_on_desk.brain.tts.sentence_buffer import SentenceBuffer
+from miku_on_desk.brain.tts.text_sanitizer import sanitize_for_speech
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +97,19 @@ class SpeechController(QObject):
     def feed(self, text: str) -> None:
         """喂入一段流式增量文本（对应一次 ``ContentDelta``）。"""
         for sentence in self._buffer.feed(text):
-            self._worker.submit(self._generation, sentence)
+            self._submit(sentence)
 
     def flush(self) -> None:
         """一轮回复结束（``LoopFinished``）时调用，把残留的最后一句补交合成。"""
         remainder = self._buffer.flush()
         if remainder is not None:
-            self._worker.submit(self._generation, remainder)
+            self._submit(remainder)
+
+    def _submit(self, sentence: str) -> None:
+        """过滤掉 emoji/符号等念出来是噪音的字符后提交合成；清理后为空则跳过。"""
+        speech = sanitize_for_speech(sentence)
+        if speech:
+            self._worker.submit(self._generation, speech)
 
     def stop(self) -> None:
         """打断当前播报：丢弃缓冲、在途音频与播放队列，立即静音。"""
