@@ -187,7 +187,11 @@ async def _run_vision_grounding(
 
 
 def _make_screen_analyze_handler(
-    *, backend: PlatformBackend, router: ModelRouter, providers: Mapping[ProviderName, Provider]
+    *,
+    backend: PlatformBackend,
+    router: ModelRouter,
+    providers: Mapping[ProviderName, Provider],
+    match_threshold: float = _MATCH_THRESHOLD,
 ) -> ToolHandler:
     async def handler(tool_input: dict[str, Any]) -> str:
         try:
@@ -223,12 +227,12 @@ def _make_screen_analyze_handler(
             matched = [
                 {**element, "match_score": score}
                 for element, score in scored
-                if score >= _MATCH_THRESHOLD
+                if score >= match_threshold
             ]
             if matched:
                 logger.debug("query 命中 %d 个元素，跳过视觉定位", len(matched))
                 matched.sort(key=lambda e: e["match_score"], reverse=True)
-                unmatched = [element for element, score in scored if score < _MATCH_THRESHOLD]
+                unmatched = [element for element, score in scored if score < match_threshold]
                 payload["elements"] = matched + unmatched
             else:
                 logger.debug("query 未命中任何元素，退回视觉定位")
@@ -255,6 +259,7 @@ def register_screen_analyze_tool(
     router: ModelRouter,
     providers: Mapping[ProviderName, Provider],
     registry: ToolRegistry,
+    match_threshold: float = _MATCH_THRESHOLD,
 ) -> None:
     registry.register(
         ToolRegistration(
@@ -290,7 +295,7 @@ def register_screen_analyze_tool(
                 },
             ),
             handler=_make_screen_analyze_handler(
-                backend=backend, router=router, providers=providers
+                backend=backend, router=router, providers=providers, match_threshold=match_threshold
             ),
         )
     )

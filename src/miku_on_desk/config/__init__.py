@@ -17,6 +17,8 @@ from miku_on_desk.config.settings import (
     ShortcutsConfig,
     WindowConfig,
     default_settings_path,
+    load_settings_with_vault,
+    save_settings_with_vault,
 )
 
 __all__ = [
@@ -36,4 +38,6 @@ __all__ = [
     "ShortcutsConfig",
     "WindowConfig",
     "default_settings_path",
+    "load_settings_with_vault",
+    "save_settings_with_vault",
 ]

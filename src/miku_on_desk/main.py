@@ -30,11 +30,18 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QWidget,
 )
+from qfluentwidgets import MessageBox
 
 from miku_on_desk.brain.acp.manager import AcpManager, register_acp_delegate_tool
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile, default_agent_manager
 from miku_on_desk.brain.agents.spawn import register_spawn_agents_tool
-from miku_on_desk.brain.loop import LoopCallbacks, LoopResult, LoopStopReason, run_ai_loop
+from miku_on_desk.brain.loop import (
+    LoopCallbacks,
+    LoopConfig,
+    LoopResult,
+    LoopStopReason,
+    run_ai_loop,
+)
 from miku_on_desk.brain.mcp.host import MCPHost
 from miku_on_desk.brain.memory import extraction
 from miku_on_desk.brain.memory.models import Entity, Fact, MemoryUnit, MemoryUnitRole
@@ -47,6 +54,7 @@ from miku_on_desk.brain.providers.anthropic_provider import AnthropicProvider
 from miku_on_desk.brain.providers.base import Message, Provider, TextBlock
 from miku_on_desk.brain.providers.gemini_provider import GeminiProvider
 from miku_on_desk.brain.providers.openai_compatible_provider import OpenAICompatibleProvider
+from miku_on_desk.brain.secrets.vault import SecretVault, default_vault_paths
 from miku_on_desk.brain.skills.manager import default_skill_manager, register_skill_tool
 from miku_on_desk.brain.tools.builtin.computer_input import register_computer_input_tool
 from miku_on_desk.brain.tools.builtin.express_reaction import register_express_reaction_tool
@@ -58,6 +66,7 @@ from miku_on_desk.brain.tools.read_tracker import ReadTracker
 from miku_on_desk.brain.tools.registry import ToolRegistry
 from miku_on_desk.bridge.events import (
     AcpChunkReceived,
+    BrainCrashed,
     BrainEventBus,
     CancellationGate,
     ConfirmationGate,
@@ -75,6 +84,7 @@ from miku_on_desk.config import (
     PersonaConfig,
     ProviderName,
     default_settings_path,
+    load_settings_with_vault,
 )
 from miku_on_desk.config.logging_config import setup_logging
 from miku_on_desk.face.hooks.bridge import HookEventBus
@@ -243,6 +253,7 @@ async def _brain_main(
     message_queue: QueuedMessageQueue,
     chat_input: queue.Queue[object],
     session_id: str,
+    memory_system: MemorySystem,
 ) -> None:
     providers = _build_providers(settings.model_router)
     router = ModelRouter(settings.model_router)
@@ -253,14 +264,17 @@ async def _brain_main(
     registry = ToolRegistry(policy, read_tracker)
     register_express_reaction_tool(event_bus, registry)
 
-    memory_system = await asyncio.to_thread(default_memory_system, settings.memory_dir, bootstrap)
     await asyncio.to_thread(memory_system.base.start_session, session_id, "桌面对话")
     register_memory_tools(memory_system, registry)
 
     backend = create_platform_backend()
     register_computer_input_tool(backend, registry)
     register_screen_analyze_tool(
-        backend=backend, router=router, providers=providers, registry=registry
+        backend=backend,
+        router=router,
+        providers=providers,
+        registry=registry,
+        match_threshold=settings.memory_tuning.screen_match_threshold,
     )
 
     skill_manager = default_skill_manager(settings.skills_dir, bootstrap)
@@ -285,6 +299,7 @@ async def _brain_main(
         acp_manager,
         registry,
         on_chunk=lambda agent, text: event_bus.emit_event(AcpChunkReceived(agent=agent, text=text)),
+        path_sandbox=path_sandbox,
     )
 
     mcp_host = MCPHost(registry)
@@ -298,6 +313,18 @@ async def _brain_main(
         router=router,
         providers=providers,
         memory_system=memory_system,
+        token_threshold=settings.memory_tuning.compaction_token_threshold,
+        keep_recent=settings.memory_tuning.compaction_keep_recent,
+    )
+    loop_config = LoopConfig(
+        max_tool_rounds=settings.loop_behavior.max_tool_rounds,
+        idle_timeout_s=settings.loop_behavior.idle_timeout_s,
+        hard_timeout_s=settings.loop_behavior.hard_timeout_s,
+        budget_caution_remaining=settings.loop_behavior.budget_caution_remaining,
+        budget_critical_remaining=settings.loop_behavior.budget_critical_remaining,
+        deadline_s=settings.loop_behavior.deadline_s,
+        time_caution_remaining_s=settings.loop_behavior.time_caution_remaining_s,
+        time_critical_remaining_s=settings.loop_behavior.time_critical_remaining_s,
     )
 
     frozen_system = build_frozen_system(
@@ -375,6 +402,7 @@ async def _brain_main(
                     system=frozen_system,
                     messages=augmented,
                     callbacks=callbacks,
+                    config=loop_config,
                 )
             )
             cancellation_gate.arm(task)
@@ -427,6 +455,7 @@ def _run_brain_thread(
     message_queue: QueuedMessageQueue,
     chat_input: queue.Queue[object],
     session_id: str,
+    memory_system: MemorySystem,
 ) -> None:
     try:
         asyncio.run(
@@ -439,9 +468,11 @@ def _run_brain_thread(
                 message_queue=message_queue,
                 chat_input=chat_input,
                 session_id=session_id,
+                memory_system=memory_system,
             )
         )
-    except Exception:
+    except Exception as exc:
+        event_bus.emit_event(BrainCrashed(error=str(exc) or type(exc).__name__))
         logger.exception("Brain 线程异常退出")
 
 
@@ -486,26 +517,28 @@ class PetActions:
     """右键圆环菜单与系统托盘菜单共享的底层操作，避免两处各写一份。"""
 
     talk: Callable[[str], None]
+    queue_message: Callable[[str], None]
     open_settings: Callable[[], SettingsPanel]
     open_memory: Callable[[], MemoryPanel]
     open_characters: Callable[[], CharacterGalleryPanel]
     quit: Callable[[], None]
 
 
-def _open_settings_panel(settings_path: Path, open_windows: list[QWidget]) -> SettingsPanel:
-    current_settings = AppSettings.load(settings_path)
-    panel = SettingsPanel(current_settings, settings_path)
+def _open_settings_panel(
+    settings_path: Path, open_windows: list[QWidget], *, vault: SecretVault | None = None
+) -> SettingsPanel:
+    if vault is not None:
+        current_settings = load_settings_with_vault(settings_path, vault)
+    else:
+        current_settings = AppSettings.load(settings_path)
+    panel = SettingsPanel(current_settings, settings_path, vault=vault)
     panel.setWindowTitle("设置")
     open_windows.append(panel)
     panel.show()
     return panel
 
 
-def _open_memory_panel(
-    settings_path: Path, bootstrap: EnvBootstrap, open_windows: list[QWidget]
-) -> MemoryPanel:
-    current_settings = AppSettings.load(settings_path)
-    memory_system = default_memory_system(current_settings.memory_dir, bootstrap)
+def _open_memory_panel(memory_system: MemorySystem, open_windows: list[QWidget]) -> MemoryPanel:
     panel = MemoryPanel(memory_system)
     panel.setWindowTitle("记忆管理")
     open_windows.append(panel)
@@ -525,8 +558,10 @@ def _open_character_creation_dialog(
     gallery_panel: CharacterGalleryPanel,
     settings_path: Path,
     open_windows: list[QWidget],
+    *,
+    vault: SecretVault | None = None,
 ) -> CharacterCreationDialog:
-    dialog = CharacterCreationDialog(_assets_pets_dir(), settings_path)
+    dialog = CharacterCreationDialog(_assets_pets_dir(), settings_path, vault=vault)
 
     def _on_created(pet_dir: Path) -> None:
         _on_character_switched(pet_dir, window, settings_path)
@@ -539,7 +574,11 @@ def _open_character_creation_dialog(
 
 
 def _open_character_gallery(
-    window: OverlayWindow, settings_path: Path, open_windows: list[QWidget]
+    window: OverlayWindow,
+    settings_path: Path,
+    open_windows: list[QWidget],
+    *,
+    vault: SecretVault | None = None,
 ) -> CharacterGalleryPanel:
     current_settings = AppSettings.load(settings_path)
     pet_dir = current_settings.window.pet_dir or _default_pet_dir()
@@ -549,11 +588,48 @@ def _open_character_gallery(
         lambda new_pet_dir: _on_character_switched(new_pet_dir, window, settings_path)
     )
     panel.create_requested.connect(
-        lambda: _open_character_creation_dialog(window, panel, settings_path, open_windows)
+        lambda: _open_character_creation_dialog(
+            window, panel, settings_path, open_windows, vault=vault
+        )
     )
     open_windows.append(panel)
     panel.show()
     return panel
+
+
+def _startup_health_warnings(settings: AppSettings, bootstrap: EnvBootstrap) -> list[str]:
+    """检查一批"跑起来才会暴露"的环境问题，返回给用户看的问题描述（不阻塞启动）。
+
+    覆盖：至少一个 Provider 已启用、数据目录可写、（仅 macOS）辅助功能权限已授权——
+    未授权时 ``computer_input`` 会静默失败，提前提示比事后排查更可操作。
+    """
+    warnings: list[str] = []
+
+    if not settings.model_router.enabled_providers():
+        warnings.append(
+            "没有任何已启用的模型 Provider，无法进行对话——请在设置面板中至少配置一个 "
+            "Provider 的 API Key 和模型。"
+        )
+
+    data_dir = bootstrap.resolve_data_dir()
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        probe = data_dir / ".miku_write_probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        warnings.append(f"数据目录 {data_dir} 不可写（{exc}），记忆与配置可能无法保存。")
+
+    if sys.platform == "darwin":
+        from miku_on_desk.hands_eyes.macos.accessibility import is_accessibility_trusted
+
+        if not is_accessibility_trusted():
+            warnings.append(
+                "尚未授权「辅助功能」权限，操作电脑（点击/输入/切换应用）将静默失败——"
+                "请前往 系统设置 → 隐私与安全性 → 辅助功能，勾选本应用后重启。"
+            )
+
+    return warnings
 
 
 def _build_tray_icon(app: QApplication, actions: PetActions) -> tuple[QSystemTrayIcon, QMenu]:
@@ -605,7 +681,8 @@ def main() -> None:
     setup_logging(bootstrap.resolve_log_dir(), level=bootstrap.log_level)
 
     settings_path = default_settings_path(bootstrap)
-    settings = AppSettings.load(settings_path)
+    vault = SecretVault(*default_vault_paths(bootstrap))
+    settings = load_settings_with_vault(settings_path, vault)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -624,6 +701,10 @@ def main() -> None:
     hook_bus = HookEventBus()
     hook_server = _start_hook_server(settings.hook_server, bootstrap, hook_bus)
 
+    memory_system = default_memory_system(
+        settings.memory_dir, bootstrap, tuning=settings.memory_tuning
+    )
+
     brain_thread = threading.Thread(
         target=_run_brain_thread,
         kwargs={
@@ -635,6 +716,7 @@ def main() -> None:
             "message_queue": message_queue,
             "chat_input": chat_input,
             "session_id": session_id,
+            "memory_system": memory_system,
         },
         daemon=True,
     )
@@ -643,20 +725,30 @@ def main() -> None:
     open_windows: list[QWidget] = []
 
     def _on_quit() -> None:
+        cancellation_gate.request_stop()
         chat_input.put(_SHUTDOWN)
         brain_thread.join(timeout=10.0)
+        if brain_thread.is_alive():
+            logger.warning("Brain 线程在 10 秒内未能正常退出，强制关闭应用")
         if hook_server is not None:
             hook_server.stop()
+        vault.close()
         app.quit()
 
     # ``window`` 在这个闭包创建时还未赋值，但 lambda 只在用户真正点开右键菜单的
     # "角色生成"项时才会被调用（必然晚于下面 `window = OverlayWindow(...)` 的赋值），
     # Python 闭包按名字在调用时从 `main()` 的作用域里取值，这里依赖的是这种后绑定语义。
+    def _queue_message(text: str) -> None:
+        message_queue.push(text)
+
     actions = PetActions(
         talk=chat_input.put,
-        open_settings=lambda: _open_settings_panel(settings_path, open_windows),
-        open_memory=lambda: _open_memory_panel(settings_path, bootstrap, open_windows),
-        open_characters=lambda: _open_character_gallery(window, settings_path, open_windows),
+        queue_message=_queue_message,
+        open_settings=lambda: _open_settings_panel(settings_path, open_windows, vault=vault),
+        open_memory=lambda: _open_memory_panel(memory_system, open_windows),
+        open_characters=lambda: _open_character_gallery(
+            window, settings_path, open_windows, vault=vault
+        ),
         quit=_on_quit,
     )
 
@@ -680,6 +772,12 @@ def main() -> None:
 
     tray, _tray_menu = _build_tray_icon(app, actions)
     tray.show()
+
+    health_warnings = _startup_health_warnings(settings, bootstrap)
+    if health_warnings:
+        health_box = MessageBox("启动检查", "\n\n".join(health_warnings), window)
+        health_box.hideCancelButton()
+        health_box.exec()
 
     app.exec()
 

@@ -1,15 +1,14 @@
-"""跨格式混合检索，对齐设计文档 §5.1/§7.2：语义/情景/情感三路查询 + token 预算组装。
+"""跨格式混合检索：语义/情景/情感三路查询 + token 预算组装。
 
 两个入口，服务不同调用方：
 - `retrieve_hints`：每轮对话都会调用的轻量版本（`reminder.py` 用），只做三路关键词搜索 +
   排序截断，不做 token 预算组装——每轮提醒只需要几行提示，不是一整块可读上下文。
-- `retrieve`：设计文档 §7.2 的完整读取管线，按语义 40% / 情景 30% / 情感 15%（剩余 15% 是
-  文档里"系统提示 + 格式开销"的预留份额，不由本函数消费）分配 `token_budget`，拼成一段可读
-  文本块。
+- `retrieve`：完整读取管线，按语义 40% / 情景 30% / 情感 15%（剩余 15% 是系统提示 + 格式
+  开销的预留份额，不由本函数消费）分配 `token_budget`，拼成一段可读文本块。
 
-两处对设计文档的显式简化：
-1. 不做"Stage 1: 查询分析与意图分类"（实体识别/意图分类/查询向量化）——直接把原始查询字符串
-   同时喂给三路子检索，省掉一个需要额外 LLM 调用才能做的查询理解步骤；三路各自的子串匹配已经
+两处针对性简化：
+1. 不做查询分析与意图分类（实体识别/意图分类/查询向量化）——直接把原始查询字符串同时喂给
+   三路子检索，省掉一个需要额外 LLM 调用才能做的查询理解步骤；三路各自的子串匹配已经
    对齐 `semantic_store.search_facts`/`episodic_store.search` 现有实现。
 2. 不在读取路径里跑 `conflict.resolve_conflicts`——`extraction.py` 已经在写入时把同一
    `(subject, predicate)` 分组的冲突事实解决掉（败者标记 `superseded`），读取路径只需要按
@@ -124,12 +123,13 @@ def retrieve(
     emotional: EmotionalStore,
     query: str,
     token_budget: int = _DEFAULT_TOKEN_BUDGET,
+    min_confidence: float = _MIN_CONFIDENCE,
 ) -> str:
-    """设计文档 §7.2 完整读取管线：三路检索，按 40/30/15% 的 token 预算拼成一段可读文本。"""
+    """完整读取管线：三路检索，按 40/30/15% 的 token 预算拼成一段可读文本。"""
     active_facts = [
         fact
         for fact in semantic.search_facts(query, limit=_CANDIDATE_FETCH_LIMIT)
-        if fact.status == "active" and fact.confidence > _MIN_CONFIDENCE
+        if fact.status == "active" and fact.confidence > min_confidence
     ]
     active_facts.sort(key=lambda fact: fact.confidence, reverse=True)
     episodes = episodic.search(query, limit=_CANDIDATE_FETCH_LIMIT)

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
@@ -23,6 +23,7 @@ from miku_on_desk.brain.loop import LoopResult, LoopStopReason, QueuedMessage
 from miku_on_desk.brain.providers.base import ToolResultBlock, ToolUseBlock
 from miku_on_desk.bridge.events import (
     AcpChunkReceived,
+    BrainCrashed,
     BrainEventBus,
     CancellationGate,
     ConfirmationGate,
@@ -326,6 +327,36 @@ def test_confirmation_requested_without_reason_falls_back_to_tool_name(
     assert window._bubble.current_text() == '是否允许 "computer_input"？'
 
 
+async def test_confirmation_requested_while_previous_unresolved_auto_denies_stale_request(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """acp_delegate/spawn_agents 的并发子代理可能各自触发一次确认请求——气泡一次只能
+    追踪一个 request_id，旧请求若被静默覆盖，其 Future 永远等不到 resolve，会让对应的
+    Brain 任务永久挂起。新请求到达时应自动拒绝旧请求，避免协程悬挂/网关泄漏。
+    """
+    bus = BrainEventBus()
+    gate = ConfirmationGate(bus)
+    window = _make_window(tmp_path, event_bus=bus, confirmation_gate=gate)
+    tool_use_a = ToolUseBlock(id="a", name="acp_delegate", input={})
+    tool_use_b = ToolUseBlock(id="b", name="acp_delegate", input={})
+
+    first_task = asyncio.ensure_future(gate.request(tool_use_a, "第一个确认"))
+    for _ in range(50):
+        if window._pending_confirmation_request_id is not None:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("第一个确认请求没有在预期时间内到达")
+    first_request_id = window._pending_confirmation_request_id
+
+    bus.emit_event(ConfirmationRequested("second", tool_use_b, "第二个确认"))
+    first_approved = await first_task
+
+    assert first_approved is False
+    assert first_request_id != "second"
+    assert window._pending_confirmation_request_id == "second"
+
+
 def test_default_shortcuts_match_shift_ctrl_y_and_n(qapp: QApplication, tmp_path: Path) -> None:
     window = _make_window(tmp_path)
 
@@ -513,6 +544,30 @@ def test_loop_finished_after_confirmation_requested_clears_stale_confirmation_bu
     assert window._pending_confirmation_request_id is None
 
 
+def test_brain_crashed_sets_error_baseline_and_shows_message(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    bus = BrainEventBus()
+    window = _make_window(tmp_path, event_bus=bus)
+
+    bus.emit_event(BrainCrashed(error="炸了"))
+
+    assert window._state_machine.current_state(window._elapsed()) == PetState.ERROR
+    assert "炸了" in window._bubble.current_text()
+    assert window._bubble.is_awaiting_confirmation() is False
+
+
+def test_brain_crashed_hides_stop_button(qapp: QApplication, tmp_path: Path) -> None:
+    bus = BrainEventBus()
+    window = _make_window(tmp_path, event_bus=bus)
+    bus.emit_event(ContentDelta("你"))
+    assert window._stop_button.isVisibleTo(window) is True
+
+    bus.emit_event(BrainCrashed(error="炸了"))
+
+    assert window._stop_button.isVisibleTo(window) is False
+
+
 def test_stop_button_click_invokes_cancellation_gate_request_stop(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,8 +608,9 @@ def test_resize_repositions_bubble_to_span_new_width(qapp: QApplication, tmp_pat
 
 
 def test_content_delta_growing_bubble_keeps_sprite_bottom_anchored(
-    qapp: QApplication, tmp_path: Path
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(QTimer, "singleShot", lambda _ms, fn: fn())
     bus = BrainEventBus()
     window = _make_window(tmp_path, event_bus=bus)
     sprite_bottom_before = window.y() + window._sprite_widget.y() + window._sprite_widget.height()
@@ -564,6 +620,57 @@ def test_content_delta_growing_bubble_keeps_sprite_bottom_anchored(
     sprite_bottom_after = window.y() + window._sprite_widget.y() + window._sprite_widget.height()
     assert sprite_bottom_after == sprite_bottom_before
     assert window._sprite_widget.y() > 0
+
+
+def test_content_delta_batches_rapid_reflow_calls_into_a_single_scheduled_timer(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """流式增量到达频率可能远超肉眼可感知的重排速度——多条连续 delta 应该只调度一次
+    延迟重排，而不是每条都立刻做一次整窗 setGeometry（那样会造成明显抖动/闪烁）。
+    """
+    scheduled: list[int] = []
+    monkeypatch.setattr(QTimer, "singleShot", lambda ms, _fn: scheduled.append(ms))
+    bus = BrainEventBus()
+    window = _make_window(tmp_path, event_bus=bus)
+
+    bus.emit_event(ContentDelta("你"))
+    bus.emit_event(ContentDelta("好"))
+    bus.emit_event(ContentDelta("呀"))
+
+    assert len(scheduled) == 1
+    assert window._reflow_pending is True
+    assert window._bubble.current_text() == "你好呀"
+
+
+def test_scheduled_reflow_resets_pending_flag_so_next_delta_reschedules(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduled: list[int] = []
+    monkeypatch.setattr(QTimer, "singleShot", lambda ms, fn: (scheduled.append(ms), fn())[1])
+    bus = BrainEventBus()
+    window = _make_window(tmp_path, event_bus=bus)
+
+    bus.emit_event(ContentDelta("你"))
+    assert window._reflow_pending is False
+    assert len(scheduled) == 1
+
+    bus.emit_event(ContentDelta("好"))
+    assert len(scheduled) == 2
+
+
+def test_acp_chunk_received_also_throttles_reflow(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduled: list[int] = []
+    monkeypatch.setattr(QTimer, "singleShot", lambda ms, _fn: scheduled.append(ms))
+    bus = BrainEventBus()
+    window = _make_window(tmp_path, event_bus=bus)
+
+    bus.emit_event(AcpChunkReceived(agent="claude-code", text="正在"))
+    bus.emit_event(AcpChunkReceived(agent="claude-code", text="重构"))
+
+    assert len(scheduled) == 1
+    assert window._reflow_pending is True
 
 
 def test_hook_event_baseline_transition_sets_baseline_state(
@@ -894,12 +1001,14 @@ def test_context_menu_wires_radial_menu_signals_to_actions(
     monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
 
     talked: list[str] = []
+    queued: list[str] = []
     settings_calls: list[None] = []
     memory_calls: list[None] = []
     characters_calls: list[None] = []
     quit_calls: list[None] = []
     actions = PetActions(
         talk=talked.append,
+        queue_message=queued.append,
         open_settings=lambda: settings_calls.append(None),
         open_memory=lambda: memory_calls.append(None),
         open_characters=lambda: characters_calls.append(None),
@@ -926,6 +1035,36 @@ def test_context_menu_wires_radial_menu_signals_to_actions(
     created_popups[0].text_submitted.emit("你好")
 
     assert talked == ["你好"]
+    assert queued == []
+
+
+def test_context_menu_chat_popup_routes_to_queue_message_when_busy(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """停止按钮可见（有 loop 在跑）时，聊天气泡提交的文本应该插话入队而不是直接开始新一轮。"""
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+
+    talked: list[str] = []
+    queued: list[str] = []
+    actions = PetActions(
+        talk=talked.append,
+        queue_message=queued.append,
+        open_settings=lambda: None,  # type: ignore[arg-type]
+        open_memory=lambda: None,  # type: ignore[arg-type]
+        open_characters=lambda: None,  # type: ignore[arg-type]
+        quit=lambda: None,
+    )
+    window = _make_window(tmp_path, actions=actions)
+    window.show()
+    window._show_stop_button()
+
+    window._show_chat_popup(QPoint(10, 10))
+    assert len(created_popups) == 1
+    created_popups[0].text_submitted.emit("插话")
+
+    assert queued == ["插话"]
+    assert talked == []
 
 
 def test_set_pet_dir_replaces_sprite_widget_and_resets_state_machine(
@@ -959,6 +1098,22 @@ def test_set_pet_dir_new_sprite_widget_is_visible_after_window_shown(
     window.set_pet_dir(other_pet_dir)
 
     assert window._sprite_widget.isVisibleTo(window) is True
+
+
+def test_set_pet_dir_hides_old_sprite_widget_immediately_to_avoid_overlap_flash(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """``deleteLater()`` 是异步删除，真正回收发生在下一次事件循环迭代——如果不显式
+    ``hide()`` 旧精灵，热切换期间新旧两个精灵会短暂重叠可见，造成一帧闪烁。
+    """
+    other_pet_dir = _make_pet_dir(tmp_path, dir_name="other_pet", pet_name="other_pet")
+    window = _make_window(tmp_path)
+    window.show()
+    original_sprite_widget = window._sprite_widget
+
+    window.set_pet_dir(other_pet_dir)
+
+    assert original_sprite_widget.isVisibleTo(window) is False
 
 
 def test_stop_button_and_progress_label_have_non_empty_stylesheets(

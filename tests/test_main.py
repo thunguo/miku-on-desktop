@@ -6,20 +6,32 @@ asyncio 事件循环，不在这里测试。
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from PIL import Image
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
 from miku_on_desk.brain.memory.models import Entity, Fact
+from miku_on_desk.brain.memory.system import default_memory_system
 from miku_on_desk.brain.providers.anthropic_provider import AnthropicProvider
 from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
 from miku_on_desk.brain.providers.gemini_provider import GeminiProvider
 from miku_on_desk.brain.providers.openai_compatible_provider import OpenAICompatibleProvider
+from miku_on_desk.bridge.events import (
+    BrainCrashed,
+    BrainEventBus,
+    CancellationGate,
+    ConfirmationGate,
+    QueuedMessageQueue,
+)
 from miku_on_desk.config.settings import (
     AgentProfileConfig,
     AppSettings,
+    EnvBootstrap,
     ModelRouterConfig,
     ModelTier,
     PersonaConfig,
@@ -37,7 +49,10 @@ from miku_on_desk.main import (
     _format_core_memory,
     _format_memory_index,
     _open_character_creation_dialog,
+    _open_memory_panel,
     _rebase_history,
+    _run_brain_thread,
+    _startup_health_warnings,
     _sync_agent_profiles,
 )
 
@@ -265,3 +280,113 @@ def test_character_created_hot_switches_window_and_persists_settings(
     assert window._sprite_widget.isVisibleTo(window) is True
     assert AppSettings.load(settings_path).window.pet_dir == new_pet_dir
     assert gallery_panel._current_pet_dir == new_pet_dir
+
+
+def test_run_brain_thread_emits_brain_crashed_when_brain_main_raises(
+    qapp: QApplication,
+) -> None:
+    bus = BrainEventBus()
+    captured: list[object] = []
+    bus.brain_event.connect(captured.append)
+
+    with patch("miku_on_desk.main._brain_main", side_effect=RuntimeError("炸了")):
+        thread = threading.Thread(
+            target=_run_brain_thread,
+            kwargs={
+                "settings": Mock(),
+                "bootstrap": Mock(),
+                "event_bus": bus,
+                "confirm_gate": ConfirmationGate(bus),
+                "cancellation_gate": CancellationGate(),
+                "message_queue": QueuedMessageQueue(),
+                "chat_input": queue.Queue(),
+                "session_id": "s1",
+                "memory_system": Mock(),
+            },
+        )
+        thread.start()
+        thread.join(timeout=5.0)
+
+    qapp.processEvents()
+
+    assert captured == [BrainCrashed(error="炸了")]
+
+
+def test_open_memory_panel_reuses_passed_in_memory_system_instance(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """阶段 E 单例化：`_open_memory_panel` 必须复用调用方传入的 `MemorySystem`，
+    不能像之前那样自己重新构造一份——否则 UI 线程和 Brain 线程会各自持有互不相通的实例，
+    同时写同一批存储文件时产生竞态。
+    """
+    memory_system = default_memory_system(tmp_path / "memory")
+    open_windows: list[QWidget] = []
+
+    panel = _open_memory_panel(memory_system, open_windows)
+
+    assert panel._system is memory_system
+    assert panel in open_windows
+
+
+def _enabled_settings() -> AppSettings:
+    settings = AppSettings()
+    settings.model_router.anthropic = ProviderConfig(
+        api_key="sk-ant", models={ModelTier.FAST: "haiku"}
+    )
+    return settings
+
+
+def test_startup_health_warnings_flags_missing_enabled_provider(tmp_path: Path) -> None:
+    bootstrap = EnvBootstrap(data_dir=tmp_path / "data")
+
+    with patch(
+        "miku_on_desk.hands_eyes.macos.accessibility.is_accessibility_trusted",
+        return_value=True,
+    ):
+        warnings = _startup_health_warnings(AppSettings(), bootstrap)
+
+    assert any("Provider" in warning for warning in warnings)
+
+
+def test_startup_health_warnings_flags_unwritable_data_dir(tmp_path: Path) -> None:
+    blocked_path = tmp_path / "blocked"
+    blocked_path.write_text("", encoding="utf-8")
+    bootstrap = EnvBootstrap(data_dir=blocked_path)
+
+    with patch(
+        "miku_on_desk.hands_eyes.macos.accessibility.is_accessibility_trusted",
+        return_value=True,
+    ):
+        warnings = _startup_health_warnings(_enabled_settings(), bootstrap)
+
+    assert any("不可写" in warning for warning in warnings)
+
+
+def test_startup_health_warnings_flags_missing_accessibility_trust_on_macos(
+    tmp_path: Path,
+) -> None:
+    bootstrap = EnvBootstrap(data_dir=tmp_path / "data")
+
+    with (
+        patch("sys.platform", "darwin"),
+        patch(
+            "miku_on_desk.hands_eyes.macos.accessibility.is_accessibility_trusted",
+            return_value=False,
+        ),
+    ):
+        warnings = _startup_health_warnings(_enabled_settings(), bootstrap)
+
+    assert any("辅助功能" in warning for warning in warnings)
+
+
+def test_startup_health_warnings_empty_when_everything_healthy(tmp_path: Path) -> None:
+    bootstrap = EnvBootstrap(data_dir=tmp_path / "data")
+
+    with patch(
+        "miku_on_desk.hands_eyes.macos.accessibility.is_accessibility_trusted",
+        return_value=True,
+    ):
+        warnings = _startup_health_warnings(_enabled_settings(), bootstrap)
+
+    assert warnings == []
+

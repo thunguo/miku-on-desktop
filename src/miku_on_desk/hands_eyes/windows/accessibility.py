@@ -1,7 +1,7 @@
 """Windows accessibility tree 枚举：基于 uiautomation（UIA 的 Python 封装）。
 
 本模块依据 uiautomation 库的公开 API 编写，无法在当前 macOS 开发机上实际运行验证，
-交付前必须由用户在真实 Windows 机器上跑通 Phase 1 的校验脚本。
+交付前必须由用户在真实 Windows 机器上跑通验证。
 
 坑点：uiautomation 的 ``Control.Name`` 已经是 UIA 计算好的可读名称，不像 macOS 那样
 需要在 title/description 之间猜——不必额外兜底。顶层窗口枚举必须从桌面根控件

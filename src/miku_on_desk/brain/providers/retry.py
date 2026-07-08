@@ -15,9 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from collections.abc import Awaitable, Callable
 
+from miku_on_desk.brain.backoff import (
+    DEFAULT_BASE_DELAY_S,
+    DEFAULT_MAX_DELAY_S,
+    DEFAULT_MAX_RETRIES,
+    backoff_delay,
+)
 from miku_on_desk.brain.providers.base import (
     Message,
     OnContent,
@@ -31,10 +36,6 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_ERRORS = frozenset({"rate_limited", "server_error", "connection_error"})
 
-DEFAULT_MAX_RETRIES = 3
-DEFAULT_BASE_DELAY_S = 1.0
-DEFAULT_MAX_DELAY_S = 20.0
-
 
 def classify_status_code(status_code: int | None) -> str:
     """把 HTTP 状态码归类成稳定错误 token；``None`` 代表连接层面、根本没拿到响应的失败。"""
@@ -45,12 +46,6 @@ def classify_status_code(status_code: int | None) -> str:
     if status_code >= 500:
         return "server_error"
     return "client_error"
-
-
-def _backoff_delay(attempt: int, *, base_delay_s: float, max_delay_s: float) -> float:
-    exponential = base_delay_s * (2**attempt)
-    jittered = exponential * (0.5 + random.random())
-    return float(min(jittered, max_delay_s))
 
 
 async def stream_with_retry(
@@ -103,7 +98,7 @@ async def stream_with_retry(
             return result
         if attempt >= max_retries:
             return result
-        delay = _backoff_delay(attempt, base_delay_s=base_delay_s, max_delay_s=max_delay_s)
+        delay = backoff_delay(attempt, base_delay_s=base_delay_s, max_delay_s=max_delay_s)
         logger.debug(
             "provider 瞬时性错误 %s，第 %d 次重试前等待 %.2f 秒", result.error, attempt + 1, delay
         )

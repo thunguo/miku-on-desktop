@@ -241,6 +241,52 @@ async def test_empty_string_query_is_treated_as_no_query(
     assert provider.calls == []
 
 
+async def test_custom_match_threshold_changes_whether_a_score_counts_as_matched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    element = UIElement(role="button", label="确定", center_x=1, center_y=2, width=3, height=4)
+    backend = _FakeBackend({42: [element]})
+    provider = _FakeProvider(StreamResult(success=True, content="不应该被调用"))
+    _stub_capture(monkeypatch)
+    monkeypatch.setattr(screen_analyze_module, "_match_score", lambda query, text: 0.3)
+
+    strict_dir = tmp_path / "strict"
+    strict_dir.mkdir()
+    strict_registry = _make_registry(strict_dir)
+    register_screen_analyze_tool(
+        backend=backend,
+        router=_qwen_router(),
+        providers={ProviderName.QWEN: provider},
+        registry=strict_registry,
+        match_threshold=0.6,
+    )
+    strict_result = await strict_registry.execute(
+        ToolUseBlock(id="c1", name="screen_analyze", input={"pid": 42, "query": "确定"}),
+        session_id="s1",
+    )
+    strict_payload = json.loads(strict_result.content)
+    assert "vision_grounding" in strict_payload
+
+    lenient_dir = tmp_path / "lenient"
+    lenient_dir.mkdir()
+    lenient_registry = _make_registry(lenient_dir)
+    register_screen_analyze_tool(
+        backend=backend,
+        router=_qwen_router(),
+        providers={ProviderName.QWEN: provider},
+        registry=lenient_registry,
+        match_threshold=0.1,
+    )
+    lenient_result = await lenient_registry.execute(
+        ToolUseBlock(id="c1", name="screen_analyze", input={"pid": 42, "query": "确定"}),
+        session_id="s1",
+    )
+    lenient_payload = json.loads(lenient_result.content)
+    assert "vision_grounding" not in lenient_payload
+    assert lenient_payload["elements"][0]["match_score"] == 0.3
+
+
+
 async def test_accessibility_failure_degrades_silently_and_keeps_elements_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

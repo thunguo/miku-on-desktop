@@ -205,7 +205,7 @@ async def test_run_sub_agent_reports_provider_error(
         deadline_s=600.0,
     )
     assert result.success is False
-    assert result.error == "request_idle_timeout"
+    assert result.error == "模型响应中断，可能是网络问题"
 
 
 async def test_run_sub_agent_reports_budget_exhausted_as_failure(

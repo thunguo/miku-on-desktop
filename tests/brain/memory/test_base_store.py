@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -208,3 +209,32 @@ def test_last_consolidated_defaults_to_none_and_roundtrips(store: BaseStore) -> 
     store.set_last_consolidated("2026-07-06T12:00:00+00:00")
 
     assert store.get_last_consolidated() == "2026-07-06T12:00:00+00:00"
+
+
+# ── 并发写保护（阶段 E） ──────────────────────────────────────────────────
+
+
+def test_concurrent_append_from_two_threads_has_no_lost_updates(store: BaseStore) -> None:
+    """两个线程同时对同一个 `BaseStore` 写 `index.json`，`RLock` 应避免"读改写"竞态丢更新。"""
+    errors: list[BaseException] = []
+
+    def _append_many(prefix: str) -> None:
+        try:
+            for i in range(20):
+                store.append(_unit(unit_id=f"{prefix}{i}", content=f"消息{i}"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_append_many, args=("a",)),
+        threading.Thread(target=_append_many, args=("b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    units = store.list_units()
+    assert len(units) == 40
+    assert len({unit.id for unit in units}) == 40

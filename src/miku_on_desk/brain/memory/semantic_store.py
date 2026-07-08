@@ -1,18 +1,22 @@
 """`semantic` 层：JSONL 存储的事实三元组与实体定义。
 
 只做机械的 CRUD/查询，不做去重合并——「同一实体是否已存在」「新事实是否与旧事实冲突」这类
-决策属于 `conflict.py`/`extraction.py` 编排层的职责（参见计划文档），这里保持和
-`base_store.py` 一致的"哑"存储层定位，方便独立测试。
+决策属于 `conflict.py`/`extraction.py` 编排层的职责，这里保持和 `base_store.py` 一致的
+"哑"存储层定位，方便独立测试。
 
-设计文档 §4.2 的 `edges.jsonl`/`inferred.jsonl` 没有单独建文件：实体关系可以从
-`facts.jsonl` 里 subject/object 两端解析，"推断 vs 明确陈述"的区分用 `confidence`/
-`extracted_by` 字段表达，不额外维护一份物化的边表。
+没有单独的 `edges.jsonl`/`inferred.jsonl` 文件：实体关系可以从 `facts.jsonl` 里
+subject/object 两端解析，"推断 vs 明确陈述"的区分用 `confidence`/`extracted_by`
+字段表达，不额外维护一份物化的边表。
+
+`MemorySystem` 会被 UI 线程和 Brain 线程共享同一个实例，公开方法内部用
+`threading.RLock()` 互斥，理由同 `base_store.py` 模块文档。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -129,13 +133,15 @@ class SemanticStore:
         self._facts_path = root / "facts.jsonl"
         self._entities_path = root / "entities.jsonl"
         self._root.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
     # ── facts ────────────────────────────────────────────────────────────
 
     def list_facts(
         self, *, subject: str | None = None, status: FactStatus | None = None
     ) -> list[Fact]:
-        facts = [_fact_from_dict(row) for row in _read_jsonl(self._facts_path)]
+        with self._lock:
+            facts = [_fact_from_dict(row) for row in _read_jsonl(self._facts_path)]
         if subject is not None:
             facts = [fact for fact in facts if fact.subject == subject]
         if status is not None:
@@ -154,19 +160,21 @@ class SemanticStore:
         if fact_id != fact.id:
             fact = replace(fact, id=fact_id)
 
-        rows = _read_jsonl(self._facts_path)
-        for index, row in enumerate(rows):
-            if row["id"] == fact_id:
-                rows[index] = _fact_to_dict(fact)
-                break
-        else:
-            rows.append(_fact_to_dict(fact))
-        _write_jsonl(self._facts_path, rows)
+        with self._lock:
+            rows = _read_jsonl(self._facts_path)
+            for index, row in enumerate(rows):
+                if row["id"] == fact_id:
+                    rows[index] = _fact_to_dict(fact)
+                    break
+            else:
+                rows.append(_fact_to_dict(fact))
+            _write_jsonl(self._facts_path, rows)
         return fact_id
 
     def delete_fact(self, fact_id: str) -> None:
-        rows = [row for row in _read_jsonl(self._facts_path) if row["id"] != fact_id]
-        _write_jsonl(self._facts_path, rows)
+        with self._lock:
+            rows = [row for row in _read_jsonl(self._facts_path) if row["id"] != fact_id]
+            _write_jsonl(self._facts_path, rows)
 
     def list_pinned_facts(self) -> list[Fact]:
         return [
@@ -191,7 +199,8 @@ class SemanticStore:
     # ── entities ─────────────────────────────────────────────────────────
 
     def list_entities(self) -> list[Entity]:
-        return [_entity_from_dict(row) for row in _read_jsonl(self._entities_path)]
+        with self._lock:
+            return [_entity_from_dict(row) for row in _read_jsonl(self._entities_path)]
 
     def get_entity(self, entity_id: str) -> Entity | None:
         for entity in self.list_entities():
@@ -214,25 +223,28 @@ class SemanticStore:
         if entity_id != entity.id:
             entity = replace(entity, id=entity_id)
 
-        rows = _read_jsonl(self._entities_path)
-        for index, row in enumerate(rows):
-            if row["id"] == entity_id:
-                rows[index] = _entity_to_dict(entity)
-                break
-        else:
-            rows.append(_entity_to_dict(entity))
-        _write_jsonl(self._entities_path, rows)
+        with self._lock:
+            rows = _read_jsonl(self._entities_path)
+            for index, row in enumerate(rows):
+                if row["id"] == entity_id:
+                    rows[index] = _entity_to_dict(entity)
+                    break
+            else:
+                rows.append(_entity_to_dict(entity))
+            _write_jsonl(self._entities_path, rows)
         return entity_id
 
     def delete_entity(self, entity_id: str) -> None:
-        rows = [row for row in _read_jsonl(self._entities_path) if row["id"] != entity_id]
-        _write_jsonl(self._entities_path, rows)
+        with self._lock:
+            rows = [row for row in _read_jsonl(self._entities_path) if row["id"] != entity_id]
+            _write_jsonl(self._entities_path, rows)
 
     def touch_entity_mention(self, entity_id: str, *, mentioned_at: str) -> None:
-        entity = self.get_entity(entity_id)
-        if entity is None:
-            return
-        updated = replace(
-            entity, last_mentioned=mentioned_at, mention_count=entity.mention_count + 1
-        )
-        self.upsert_entity(updated)
+        with self._lock:
+            entity = self.get_entity(entity_id)
+            if entity is None:
+                return
+            updated = replace(
+                entity, last_mentioned=mentioned_at, mention_count=entity.mention_count + 1
+            )
+            self.upsert_entity(updated)
