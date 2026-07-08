@@ -43,7 +43,7 @@ from miku_on_desk.brain.tools.registry import (
     ToolRegistry,
 )
 from miku_on_desk.config.settings import ModelTier, ProviderName
-from miku_on_desk.hands_eyes.backend import PlatformBackend, UIElement
+from miku_on_desk.hands_eyes.backend import PlatformBackend, element_to_dict
 from miku_on_desk.hands_eyes.capture import capture_origin, capture_screen, crop_to_bounds
 from miku_on_desk.hands_eyes.vision_fallback import encode_image_as_base64
 
@@ -71,18 +71,6 @@ class ScreenAnalyzeInput(BaseModel):
 class _PointSelection(BaseModel):
     found: bool
     point_2d: tuple[int, int] | None = None
-
-
-def _element_to_dict(element: UIElement) -> dict[str, Any]:
-    return {
-        "role": element.role,
-        "text": element.label,
-        "center_x": element.center_x,
-        "center_y": element.center_y,
-        "width": element.width,
-        "height": element.height,
-        "source": "accessibility",
-    }
 
 
 def _normalize_for_match(text: str) -> str:
@@ -212,7 +200,7 @@ def _make_screen_analyze_handler(
         if parsed.pid is not None:
             try:
                 raw_elements = await loop.run_in_executor(None, backend.list_elements, parsed.pid)
-                elements = [_element_to_dict(e) for e in raw_elements]
+                elements = [element_to_dict(e) for e in raw_elements]
             except Exception as exc:
                 logger.warning("accessibility 枚举失败（pid=%s）：%s", parsed.pid, exc)
         logger.debug("accessibility 枚举到 %d 个元素（pid=%s）", len(elements), parsed.pid)

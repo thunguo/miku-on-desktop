@@ -268,7 +268,7 @@ async def _brain_main(
     register_memory_tools(memory_system, registry)
 
     backend = create_platform_backend()
-    register_computer_input_tool(backend, registry)
+    register_computer_input_tool(backend, registry, computer_use=settings.computer_use)
     register_screen_analyze_tool(
         backend=backend,
         router=router,

@@ -9,6 +9,7 @@ from miku_on_desk.brain.secrets.vault import SecretVault
 from miku_on_desk.config.settings import (
     AcpAgentConfig,
     AppSettings,
+    ComputerUseConfig,
     HookServerConfig,
     ImageGenerationConfig,
     LongTaskConfig,
@@ -215,6 +216,24 @@ def test_app_settings_proactive_roundtrip_through_save_and_load(tmp_path: Path) 
     loaded = AppSettings.load(path)
 
     assert loaded.proactive == settings.proactive
+
+
+def test_computer_use_config_defaults_to_disabled() -> None:
+    computer_use = ComputerUseConfig()
+
+    assert computer_use.enabled is False
+    assert computer_use.settle_delay_s == 0.3
+
+
+def test_app_settings_computer_use_roundtrip_through_save_and_load(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.computer_use = ComputerUseConfig(enabled=True, settle_delay_s=1.5)
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded.computer_use == settings.computer_use
 
 
 def test_mcp_server_config_defaults_to_stdio_transport_with_no_url_or_headers() -> None:
