@@ -22,6 +22,8 @@ from miku_on_desk.config.settings import (
     ProviderConfig,
     ProviderName,
     ShortcutsConfig,
+    TTSConfig,
+    TTSProviderName,
     load_settings_with_vault,
     save_settings_with_vault,
 )
@@ -234,6 +236,62 @@ def test_app_settings_computer_use_roundtrip_through_save_and_load(tmp_path: Pat
     loaded = AppSettings.load(path)
 
     assert loaded.computer_use == settings.computer_use
+
+
+def test_tts_config_defaults_to_disabled_edge_provider_with_xiaoxiao_voice() -> None:
+    tts = TTSConfig()
+
+    assert tts.enabled is False
+    assert tts.provider is TTSProviderName.EDGE
+    assert tts.voice == "zh-CN-XiaoxiaoNeural"
+    assert tts.rate == "+0%"
+    assert tts.volume == "+0%"
+    assert tts.api_key is None
+    assert tts.base_url is None
+    assert tts.model == "tts-1"
+
+
+def test_app_settings_tts_roundtrip_through_save_and_load(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.tts = TTSConfig(
+        enabled=True,
+        provider=TTSProviderName.OPENAI,
+        voice="alloy",
+        rate="-10%",
+        volume="+20%",
+        api_key="sk-tts-plain",
+        base_url="https://api.example.com/v1",
+        model="tts-1-hd",
+    )
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded.tts == settings.tts
+
+
+def test_save_settings_with_vault_stores_tts_api_key_in_vault_not_on_disk(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.tts = TTSConfig(
+        enabled=True, provider=TTSProviderName.OPENAI, api_key="sk-tts-plain"
+    )
+
+    vault = _make_vault(tmp_path)
+    try:
+        save_settings_with_vault(settings, settings_path, vault)
+        reloaded = load_settings_with_vault(settings_path, vault)
+
+        assert reloaded.tts.api_key == "sk-tts-plain"
+        on_disk_text = settings_path.read_text(encoding="utf-8")
+        assert "sk-tts-plain" not in on_disk_text
+        on_disk = json.loads(on_disk_text)
+        assert on_disk["tts"]["api_key"].startswith("vault-ref:")
+    finally:
+        vault.close()
 
 
 def test_mcp_server_config_defaults_to_stdio_transport_with_no_url_or_headers() -> None:
