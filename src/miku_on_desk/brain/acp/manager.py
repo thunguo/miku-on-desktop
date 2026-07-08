@@ -12,6 +12,10 @@
 代价（在错误的项目里跑一次自主编码任务）远高于多问模型一个字段。为呼应这一点，`cwd` 走
 ``ToolPolicySpec.path_arg`` 接入路径沙箱校验：我们不代理外部 agent 对沙箱内文件的访问方式
 （见 `client.py` 顶部说明），但仍然限制它能拿到的工作目录必须落在允许范围内。
+
+`register_acp_delegate_tool` 的 `path_sandbox` 原样转发给 `run_acp_task`，接入的是
+`_AcpSessionClient.read_text_file`/`write_text_file` 那道防线（见 `client.py` 顶部说明），
+与上一段的 `cwd` 沙箱校验是两条独立的结构性边界，互不替代。
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from pydantic import BaseModel, ValidationError
 
 from miku_on_desk.brain.acp.client import _DEFAULT_TIMEOUT_S, run_acp_task
 from miku_on_desk.brain.providers.base import ToolDefinition
+from miku_on_desk.brain.tools.path_sandbox import PathSandbox
 from miku_on_desk.brain.tools.policy import ToolPolicySpec
 from miku_on_desk.brain.tools.registry import (
     ToolExecutionError,
@@ -70,7 +75,9 @@ class AcpDelegateInput(BaseModel):
 
 
 def _make_acp_delegate_handler(
-    manager: AcpManager, on_chunk: Callable[[str, str], None] | None
+    manager: AcpManager,
+    on_chunk: Callable[[str, str], None] | None,
+    path_sandbox: PathSandbox | None,
 ) -> ToolHandler:
     async def handler(tool_input: dict[str, Any]) -> str:
         try:
@@ -92,6 +99,7 @@ def _make_acp_delegate_handler(
             task=parsed.task,
             timeout_s=config.timeout_s or manager.default_timeout_s,
             on_chunk=forward_chunk,
+            path_sandbox=path_sandbox,
         )
         payload = {
             "success": result.success,
@@ -108,6 +116,8 @@ def register_acp_delegate_tool(
     manager: AcpManager,
     registry: ToolRegistry,
     on_chunk: Callable[[str, str], None] | None = None,
+    *,
+    path_sandbox: PathSandbox | None = None,
 ) -> None:
     agent_names = [agent.name for agent in manager.list_agents() if agent.enabled]
     if not agent_names:
@@ -143,7 +153,7 @@ def register_acp_delegate_tool(
                     "required": ["agent", "task", "cwd"],
                 },
             ),
-            handler=_make_acp_delegate_handler(manager, on_chunk),
+            handler=_make_acp_delegate_handler(manager, on_chunk, path_sandbox),
             policy_spec=ToolPolicySpec(path_arg="cwd"),
         )
     )

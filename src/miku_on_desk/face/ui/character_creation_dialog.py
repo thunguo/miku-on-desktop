@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PIL import Image
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, QVariantAnimation, Signal
@@ -43,7 +44,11 @@ from miku_on_desk.character_generation import (
     GenerationConfig,
     GenerationProgress,
 )
-from miku_on_desk.config.settings import AppSettings
+from miku_on_desk.config.settings import (
+    AppSettings,
+    load_settings_with_vault,
+    save_settings_with_vault,
+)
 from miku_on_desk.face.character_generation_worker import CharacterGenerationWorker
 from miku_on_desk.face.pet_state import PetState
 from miku_on_desk.face.ui.theme import (
@@ -57,6 +62,9 @@ from miku_on_desk.face.ui.theme import (
     border_qss,
     qcolor,
 )
+
+if TYPE_CHECKING:
+    from miku_on_desk.brain.secrets.vault import SecretVault
 
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _MODEL_CHOICES = ("gpt-image-1", "gpt-image-2")
@@ -267,7 +275,12 @@ class CharacterCreationDialog(QWidget):
     character_created = Signal(Path)
 
     def __init__(
-        self, assets_pets_dir: Path, settings_path: Path, parent: QWidget | None = None
+        self,
+        assets_pets_dir: Path,
+        settings_path: Path,
+        parent: QWidget | None = None,
+        *,
+        vault: SecretVault | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
@@ -275,6 +288,7 @@ class CharacterCreationDialog(QWidget):
         self.resize(560, 420)
         self._assets_pets_dir = assets_pets_dir
         self._settings_path = settings_path
+        self._vault = vault
         self._reference_image_path: Path | None = None
         self._worker: CharacterGenerationWorker | None = None
         self._progress_view: _GenerationProgressView | None = None
@@ -350,7 +364,10 @@ class CharacterCreationDialog(QWidget):
         return container
 
     def _prefill_from_settings(self) -> None:
-        settings = AppSettings.load(self._settings_path)
+        if self._vault is not None:
+            settings = load_settings_with_vault(self._settings_path, self._vault)
+        else:
+            settings = AppSettings.load(self._settings_path)
         image_generation = settings.image_generation
         self._base_url_edit.setText(image_generation.base_url or "")
         self._api_key_edit.setText(image_generation.api_key or "")
@@ -420,7 +437,10 @@ class CharacterCreationDialog(QWidget):
         settings.image_generation.api_key = config.api_key
         settings.image_generation.base_url = config.base_url
         settings.image_generation.model = config.model
-        settings.save(self._settings_path)
+        if self._vault is not None:
+            save_settings_with_vault(settings, self._settings_path, self._vault)
+        else:
+            settings.save(self._settings_path)
 
         progress_view = _GenerationProgressView(config.frame_width, config.frame_height, self)
         progress_view.cancel_requested.connect(self._on_cancel_generation)

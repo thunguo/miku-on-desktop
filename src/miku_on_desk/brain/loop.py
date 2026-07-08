@@ -11,9 +11,9 @@
 循环里四处不显眼但共同支撑长任务稳定性的机制,按各自依赖的具体子系统是否已存在分成两类：
 回合预算软性提醒、墙钟时间软性提醒（``LoopConfig.deadline_s``，供 ``spawn_agents`` 的子
 agent 复用，见 ``agents/spawn.py``）都不依赖任何外部子系统，纯靠 rounds 计数/
-``time.monotonic()`` 就能实现，直接内置；中途压缩上下文（依赖尚未实现的 memory/store.py，
-对应任务 #12）和排队消息注入（本项目目前没有任何消息队列来源）做成可选的注入点，传
-``None`` 时原样跳过——等对应子系统就位后再传入真正的回调，不需要改动循环本身。
+``time.monotonic()`` 就能实现，直接内置；中途压缩上下文和排队消息注入（本项目目前没有任何
+消息队列来源）做成可选的注入点，传 ``None`` 时原样跳过——等对应子系统就位后再传入真正的
+回调，不需要改动循环本身。
 
 授权确认这一环做了对应本项目场景的简化：本项目单机单用户，确认回调就是本地一个气泡对话框
 的点击结果，不存在"某一路迟迟不响应"的问题，直接 ``await callbacks.confirm(...)`` 就够，不
@@ -104,6 +104,24 @@ class LoopResult:
     raw_error: str | None = None
 
 
+_PROVIDER_ERROR_DESCRIPTIONS: dict[str, str] = {
+    "request_idle_timeout": "模型响应中断，可能是网络问题",
+    "request_hard_timeout": "单次请求耗时过长，已强制中断",
+}
+
+
+def _describe_provider_error(error: str | None) -> str | None:
+    """把 provider 层的稳定错误 token 转译成面向用户/模型的可操作文案。
+
+    只翻译双超时这两个具体到可操作的 kind；其余 token（``client_error``/
+    ``rate_limited`` 等）原样返回——它们已经是稳定的分类结果，硬编码翻译反而会掩盖
+    真实原因。未知 token 也原样返回，保持向后兼容。
+    """
+    if error is None:
+        return None
+    return _PROVIDER_ERROR_DESCRIPTIONS.get(error, error)
+
+
 def _assistant_message_from_content(text: str, tool_uses: list[ToolUseBlock]) -> Message:
     blocks: list[ContentBlock] = []
     if text:
@@ -149,6 +167,12 @@ async def _resolve_tool_call(
     session_id: str,
     callbacks: LoopCallbacks,
 ) -> ToolResultBlock:
+    logger.debug(
+        "ai_loop tool_call_start session_id=%s tool=%s tool_use_id=%s",
+        session_id,
+        tool_use.name,
+        tool_use.id,
+    )
     if callbacks.on_tool_use is not None:
         callbacks.on_tool_use(tool_use)
 
@@ -172,11 +196,19 @@ async def _resolve_tool_call(
 
     if callbacks.on_tool_result is not None:
         callbacks.on_tool_result(result)
+    logger.debug(
+        "ai_loop tool_call_end session_id=%s tool=%s tool_use_id=%s is_error=%s",
+        session_id,
+        tool_use.name,
+        tool_use.id,
+        result.is_error,
+    )
     return result
 
 
 async def _stream_with_fallback(
     *,
+    session_id: str,
     router: ModelRouter,
     providers: Mapping[ProviderName, Provider],
     resolved: ResolvedModel,
@@ -214,6 +246,13 @@ async def _stream_with_fallback(
 
     logger.debug(
         "provider %s 重试耗尽（%s），降级到 %s", resolved.provider, result.error, fallback.provider
+    )
+    logger.warning(
+        "ai_loop fallback_triggered session_id=%s from_provider=%s error=%s to_provider=%s",
+        session_id,
+        resolved.provider,
+        result.error,
+        fallback.provider,
     )
     fallback_provider = providers[fallback.provider]
     fallback_result = await stream_with_retry(
@@ -256,7 +295,15 @@ async def run_ai_loop(
             error=str(exc),
         )
     working_messages = list(messages)
+    logger.info(
+        "ai_loop loop_start session_id=%s tier=%s provider=%s model=%s",
+        session_id,
+        tier,
+        resolved.provider,
+        resolved.model_id,
+    )
     result, resolved = await _stream_with_fallback(
+        session_id=session_id,
         router=router,
         providers=providers,
         resolved=resolved,
@@ -272,7 +319,7 @@ async def run_ai_loop(
             stop_reason=LoopStopReason.PROVIDER_ERROR,
             messages=working_messages,
             rounds=0,
-            error=result.error,
+            error=_describe_provider_error(result.error),
             raw_error=result.raw_error,
         )
     working_messages.append(_assistant_message_from_content(result.content, result.tool_uses))
@@ -287,6 +334,13 @@ async def run_ai_loop(
     while tool_uses and rounds < config.max_tool_rounds:
         remaining_s = (
             None if config.deadline_s is None else config.deadline_s - (monotonic() - start)
+        )
+        logger.debug(
+            "ai_loop round_start session_id=%s round=%d tool_calls=%d remaining_s=%s",
+            session_id,
+            rounds,
+            len(tool_uses),
+            remaining_s,
         )
         if remaining_s is not None and remaining_s <= 0:
             time_exhausted = True
@@ -314,6 +368,14 @@ async def run_ai_loop(
             last_budget_warning_tier = tier_level
             warning_text = _budget_warning_text(remaining, config.max_tool_rounds, tier_level)
             _append_budget_warning(working_messages, warning_text)
+            logger.info(
+                "ai_loop budget_warning session_id=%s round=%d tier=%d remaining=%d max_rounds=%d",
+                session_id,
+                rounds,
+                tier_level,
+                remaining,
+                config.max_tool_rounds,
+            )
 
         if remaining_s is not None:
             time_tier_level = 0
@@ -325,6 +387,13 @@ async def run_ai_loop(
                 last_time_warning_tier = time_tier_level
                 time_warning_text = _time_warning_text(remaining_s, time_tier_level)
                 _append_budget_warning(working_messages, time_warning_text)
+                logger.info(
+                    "ai_loop time_warning session_id=%s round=%d tier=%d remaining_s=%.1f",
+                    session_id,
+                    rounds,
+                    time_tier_level,
+                    remaining_s,
+                )
 
         tool_results = [
             await _resolve_tool_call(
@@ -335,6 +404,7 @@ async def run_ai_loop(
         working_messages.append(Message(role="user", content=list(tool_results)))
 
         result, resolved = await _stream_with_fallback(
+            session_id=session_id,
             router=router,
             providers=providers,
             resolved=resolved,
@@ -351,7 +421,7 @@ async def run_ai_loop(
                 stop_reason=LoopStopReason.PROVIDER_ERROR,
                 messages=working_messages,
                 rounds=rounds,
-                error=result.error,
+                error=_describe_provider_error(result.error),
                 raw_error=result.raw_error,
             )
         working_messages.append(_assistant_message_from_content(result.content, result.tool_uses))
@@ -363,4 +433,10 @@ async def run_ai_loop(
         stop_reason = LoopStopReason.BUDGET_EXHAUSTED
     else:
         stop_reason = LoopStopReason.DONE
+    logger.info(
+        "ai_loop loop_end session_id=%s stop_reason=%s rounds=%d",
+        session_id,
+        stop_reason,
+        rounds,
+    )
     return LoopResult(stop_reason=stop_reason, messages=working_messages, rounds=rounds)

@@ -6,9 +6,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from mcp import types
 
 from miku_on_desk.brain.mcp.client import ConnectionState
-from miku_on_desk.brain.mcp.host import MCPHost
+from miku_on_desk.brain.mcp.host import MCPHost, _infer_policy_spec
 from miku_on_desk.brain.providers.base import ToolUseBlock
 from miku_on_desk.brain.tools.path_sandbox import PathSandbox
 from miku_on_desk.brain.tools.policy import Decision, PolicyEngine
@@ -21,6 +22,47 @@ _FIXTURE_SERVER = Path(__file__).parent / "_fixture_server.py"
 
 def _fixture_config(name: str = "fixture") -> McpServerConfig:
     return McpServerConfig(name=name, command=sys.executable, args=[str(_FIXTURE_SERVER)])
+
+
+def _tool(name: str = "some_tool", **properties: dict[str, str]) -> types.Tool:
+    return types.Tool(name=name, inputSchema={"type": "object", "properties": properties})
+
+
+@pytest.mark.parametrize("param_name", ["path", "file_path", "filepath"])
+def test_infer_policy_spec_detects_path_arg(param_name: str) -> None:
+    tool = _tool(**{param_name: {"type": "string"}})
+
+    spec = _infer_policy_spec(tool, trusted=False)
+
+    assert spec.path_arg == param_name
+
+
+@pytest.mark.parametrize("param_name", ["command", "cmd"])
+def test_infer_policy_spec_detects_command_arg(param_name: str) -> None:
+    tool = _tool(**{param_name: {"type": "string"}})
+
+    spec = _infer_policy_spec(tool, trusted=False)
+
+    assert spec.command_arg == param_name
+
+
+def test_infer_policy_spec_defaults_to_requiring_confirmation_for_untrusted_server() -> None:
+    tool = _tool()
+
+    spec = _infer_policy_spec(tool, trusted=False)
+
+    assert spec.requires_confirmation is True
+    assert spec.path_arg is None
+    assert spec.command_arg is None
+
+
+def test_infer_policy_spec_waives_confirmation_for_trusted_server() -> None:
+    tool = _tool(path={"type": "string"})
+
+    spec = _infer_policy_spec(tool, trusted=True)
+
+    assert spec.requires_confirmation is False
+    assert spec.path_arg == "path"
 
 
 @pytest.fixture

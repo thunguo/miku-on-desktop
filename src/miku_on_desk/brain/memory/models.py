@@ -1,11 +1,7 @@
 """四层文件系统记忆架构的核心数据形状：`base`/`semantic`/`episodic`/`emotional` 共用。
 
-字段名与类型直接对齐 `/Users/tew/Downloads/memory-filesystem-design.md` §4.2 的 Fact/Entity
-schema 表，以便 JSONL 序列化后的字段名与设计文档保持一致，减少未来人工比对成本。
-
-`Fact.pinned` 是设计文档 schema 之外新增的字段：旧 SQLite 实现里 `core` 记忆层承担"常驻
-frozen system prompt"这一体验，设计文档没有对应概念，用这个布尔位在新架构里保留同等能力
-（见 `semantic_store.list_pinned_facts`）。
+`Fact.pinned` 是新增字段：旧 SQLite 实现里 `core` 记忆层承担"常驻 frozen system prompt"
+这一体验，用这个布尔位在新架构里保留同等能力（见 `semantic_store.list_pinned_facts`）。
 """
 
 from __future__ import annotations
@@ -68,9 +64,8 @@ class Entity:
 class Episode:
     """`episodic` 层的一个事件块，对应 `episodic/YYYY/YYYY-MM.md` 里的一个 `### [E:NNN]` 块。
 
-    设计文档 §4.1 worked example 里的「事件链」子序列、「关联事件」跨事件引用是叙事性自由文本
-    （不是本次范围内任何编排逻辑会结构化生成/消费的字段——见计划文档 memory_panel 一节对情景
-    标签页的范围说明），这里各自建模成 `list[str]`（每行一条），照原样落盘/读回，不做进一步解析。
+    「事件链」子序列、「关联事件」跨事件引用是叙事性自由文本，不是任何编排逻辑会结构化生成/
+    消费的字段，这里各自建模成 `list[str]`（每行一条），照原样落盘/读回，不做进一步解析。
     """
 
     id: str
