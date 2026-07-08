@@ -3,8 +3,8 @@
 只负责"画出给定的 (state, frame)"这一件事，不知道时间、状态机或事件总线的存在——
 `overlay_window.py` 里的定时器算出当前该显示哪一帧后调用 `set_frame`，这样这个 widget
 可以脱离 Brain/Hook 单独测试。放大一律用最近邻（`FastTransformation`），绝不能用
-`SmoothTransformation`：Phase 2 花了多轮迭代才让生成的像素画呈现出清晰的方块颗粒感，
-平滑缩放会把这些棱角重新糊成模糊的渐变，等于前功尽弃。
+`SmoothTransformation`：生成的像素画依赖清晰的方块颗粒感，平滑缩放会把这些棱角重新糊成
+模糊的渐变，等于前功尽弃。
 """
 
 from __future__ import annotations

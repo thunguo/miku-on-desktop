@@ -214,6 +214,39 @@ async def test_run_ai_loop_executes_tool_then_completes(tmp_path: Path) -> None:
     assert tool_result_events[0].is_error is False
 
 
+async def test_run_ai_loop_emits_structured_log_fields(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG", logger="miku_on_desk.brain.loop")
+    provider = _FakeProvider(
+        [
+            StreamResult(success=True, tool_uses=[_tool_use("1")]),
+            StreamResult(success=True, content="完成"),
+        ]
+    )
+    result = await run_ai_loop(
+        session_id=_SESSION,
+        tier=_TIER,
+        router=_router(),
+        providers={ProviderName.ANTHROPIC: provider},
+        registry=_make_registry(tmp_path),
+        system="sys",
+        messages=[Message(role="user", content="帮我回声")],
+        callbacks=LoopCallbacks(confirm=_never_confirm),
+    )
+    assert result.stop_reason == LoopStopReason.DONE
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("ai_loop loop_start session_id=session-1" in m for m in messages)
+    assert any("ai_loop round_start session_id=session-1 round=0" in m for m in messages)
+    assert any(
+        "ai_loop tool_call_start session_id=session-1 tool=echo_tool" in m for m in messages
+    )
+    assert any("ai_loop tool_call_end session_id=session-1 tool=echo_tool" in m for m in messages)
+    assert any(
+        "ai_loop loop_end session_id=session-1 stop_reason=done rounds=1" in m for m in messages
+    )
+
+
 async def test_run_ai_loop_stops_with_budget_exhausted_when_rounds_run_out(
     tmp_path: Path,
 ) -> None:
@@ -278,8 +311,47 @@ async def test_run_ai_loop_returns_provider_error_on_subsequent_call(tmp_path: P
     )
     assert result.stop_reason == LoopStopReason.PROVIDER_ERROR
     assert result.rounds == 1
-    assert result.error == "request_idle_timeout"
+    assert result.error == "模型响应中断，可能是网络问题"
     assert result.raw_error == "idle"
+
+
+@pytest.mark.parametrize(
+    ("error_token", "expected_text"),
+    [
+        ("request_idle_timeout", "模型响应中断，可能是网络问题"),
+        ("request_hard_timeout", "单次请求耗时过长，已强制中断"),
+    ],
+)
+async def test_run_ai_loop_translates_timeout_kind_into_actionable_text(
+    tmp_path: Path, error_token: str, expected_text: str
+) -> None:
+    provider = _FakeProvider([StreamResult(success=False, error=error_token, raw_error="raw")])
+    result = await run_ai_loop(
+        session_id=_SESSION,
+        tier=_TIER,
+        router=_router(),
+        providers={ProviderName.ANTHROPIC: provider},
+        registry=_make_registry(tmp_path),
+        system="sys",
+        messages=[Message(role="user", content="hi")],
+        callbacks=LoopCallbacks(confirm=_never_confirm),
+    )
+    assert result.error == expected_text
+
+
+async def test_run_ai_loop_leaves_non_timeout_error_tokens_untranslated(tmp_path: Path) -> None:
+    provider = _FakeProvider([StreamResult(success=False, error="rate_limited", raw_error="raw")])
+    result = await run_ai_loop(
+        session_id=_SESSION,
+        tier=_TIER,
+        router=_router(),
+        providers={ProviderName.ANTHROPIC: provider},
+        registry=_make_registry(tmp_path),
+        system="sys",
+        messages=[Message(role="user", content="hi")],
+        callbacks=LoopCallbacks(confirm=_never_confirm),
+    )
+    assert result.error == "rate_limited"
 
 
 async def test_run_ai_loop_falls_back_to_another_provider_when_primary_fails(
@@ -301,6 +373,30 @@ async def test_run_ai_loop_falls_back_to_another_provider_when_primary_fails(
     assert result.messages[-1].role == "assistant"
     assert len(primary.calls) == 1
     assert len(fallback.calls) == 1
+
+
+async def test_run_ai_loop_logs_fallback_trigger_with_session_id(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("WARNING", logger="miku_on_desk.brain.loop")
+    primary = _FakeProvider([StreamResult(success=False, error="client_error", raw_error="denied")])
+    fallback = _FakeProvider([StreamResult(success=True, content="来自备用")])
+    await run_ai_loop(
+        session_id=_SESSION,
+        tier=_TIER,
+        router=_router_with_fallback(),
+        providers={ProviderName.ANTHROPIC: primary, ProviderName.OPENAI: fallback},
+        registry=_make_registry(tmp_path),
+        system="sys",
+        messages=[Message(role="user", content="hi")],
+        callbacks=LoopCallbacks(confirm=_never_confirm),
+    )
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "ai_loop fallback_triggered session_id=session-1 from_provider=anthropic"
+        " error=client_error to_provider=openai" in m
+        for m in messages
+    )
 
 
 async def test_run_ai_loop_preserves_original_error_when_fallback_also_fails(

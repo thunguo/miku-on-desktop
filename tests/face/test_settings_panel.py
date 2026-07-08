@@ -52,7 +52,7 @@ def test_provider_fields_load_from_settings(qapp: QApplication) -> None:
 def test_all_tabs_registered_as_fluent_sub_interfaces(qapp: QApplication) -> None:
     panel = SettingsPanel(AppSettings(), Path("unused.json"))
 
-    assert panel.stackedWidget.count() == 11
+    assert panel.stackedWidget.count() == 12
 
 
 def test_all_tabs_have_nondegenerate_size_after_switching_while_visible(
@@ -197,6 +197,83 @@ def test_current_settings_collects_edited_long_task_fields(qapp: QApplication) -
     long_tasks = panel.current_settings().long_tasks
     assert long_tasks.spawn_agents_deadline_s == 120.0
     assert long_tasks.acp_delegate_default_timeout_s == 300.0
+
+
+def test_advanced_fields_load_from_settings(qapp: QApplication) -> None:
+    from miku_on_desk.config.settings import LoopBehaviorConfig
+
+    settings = AppSettings()
+    settings.model_router.enable_cross_provider_fallback = True
+    settings.hook_server.include_experimental = True
+    settings.loop_behavior = LoopBehaviorConfig(
+        max_tool_rounds=42,
+        idle_timeout_s=30.0,
+        hard_timeout_s=300.0,
+        budget_caution_remaining=5,
+        budget_critical_remaining=2,
+        deadline_s=90.0,
+        time_caution_remaining_s=15.0,
+        time_critical_remaining_s=5.0,
+    )
+
+    panel = SettingsPanel(settings, Path("unused.json"))
+
+    assert panel._enable_cross_provider_fallback_box.isChecked() is True
+    assert panel._include_experimental_box.isChecked() is True
+    assert panel._max_tool_rounds_edit.text() == "42"
+    assert panel._idle_timeout_edit.text() == "30.0"
+    assert panel._hard_timeout_edit.text() == "300.0"
+    assert panel._budget_caution_remaining_edit.text() == "5"
+    assert panel._budget_critical_remaining_edit.text() == "2"
+    assert panel._deadline_edit.text() == "90.0"
+    assert panel._time_caution_remaining_edit.text() == "15.0"
+    assert panel._time_critical_remaining_edit.text() == "5.0"
+
+
+def test_advanced_fields_load_empty_deadline_when_none(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(), Path("unused.json"))
+
+    assert panel._deadline_edit.text() == ""
+
+
+def test_current_settings_collects_edited_advanced_fields(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(), Path("unused.json"))
+
+    panel._enable_cross_provider_fallback_box.setChecked(True)
+    panel._include_experimental_box.setChecked(True)
+    panel._max_tool_rounds_edit.setText("42")
+    panel._idle_timeout_edit.setText("30")
+    panel._hard_timeout_edit.setText("300")
+    panel._budget_caution_remaining_edit.setText("5")
+    panel._budget_critical_remaining_edit.setText("2")
+    panel._deadline_edit.setText("90")
+    panel._time_caution_remaining_edit.setText("15")
+    panel._time_critical_remaining_edit.setText("5")
+
+    settings = panel.current_settings()
+    assert settings.model_router.enable_cross_provider_fallback is True
+    assert settings.hook_server.include_experimental is True
+    loop_behavior = settings.loop_behavior
+    assert loop_behavior.max_tool_rounds == 42
+    assert loop_behavior.idle_timeout_s == 30.0
+    assert loop_behavior.hard_timeout_s == 300.0
+    assert loop_behavior.budget_caution_remaining == 5
+    assert loop_behavior.budget_critical_remaining == 2
+    assert loop_behavior.deadline_s == 90.0
+    assert loop_behavior.time_caution_remaining_s == 15.0
+    assert loop_behavior.time_critical_remaining_s == 5.0
+
+
+def test_current_settings_collects_empty_deadline_as_none(qapp: QApplication) -> None:
+    from miku_on_desk.config.settings import LoopBehaviorConfig
+
+    settings = AppSettings()
+    settings.loop_behavior = LoopBehaviorConfig(deadline_s=90.0)
+    panel = SettingsPanel(settings, Path("unused.json"))
+
+    panel._deadline_edit.setText("")
+
+    assert panel.current_settings().loop_behavior.deadline_s is None
 
 
 def test_permissions_combo_default_choice_omits_tool_from_both_lists(
@@ -514,6 +591,27 @@ def test_selecting_remote_config_populates_transport_and_url(qapp: QApplication)
     assert editor._transport_combo.currentIndex() == list(McpTransport).index(McpTransport.SSE)
     assert editor._url_edit.text() == "https://example.com/sse"
     assert editor._headers_edit.toPlainText() == "X-Token=xyz"
+
+
+def test_mcp_editor_trusted_checkbox_round_trips_through_config(qapp: QApplication) -> None:
+    configs: list[McpServerConfig] = []
+    panel = SettingsPanel(AppSettings(mcp_servers=configs), Path("unused.json"))
+    editor = panel._mcp_editor
+
+    editor._name_edit.setText("trusted-server")
+    editor._command_edit.setText("trusted-mcp")
+    editor._trusted_box.setChecked(True)
+    editor._on_add_or_update()
+
+    assert len(editor._configs) == 1
+    assert editor._configs[0].trusted is True
+
+    editor._list.setCurrentRow(0)
+    assert editor._trusted_box.isChecked() is True
+
+    editor._trusted_box.setChecked(False)
+    editor._on_add_or_update()
+    assert editor._configs[0].trusted is False
 
 
 def test_agent_profile_editor_add_edit_and_remove(

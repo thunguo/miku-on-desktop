@@ -23,13 +23,25 @@ SDK（导入名 `acp`），不手写 JSON-RPC framing——SDK 自带的 `spawn_
 再问一遍"要不要执行这个操作"没有对应的 UI 通道可以转发（Miku 只有一个确认气泡，没有能力代表
 两个独立 agent 分别确认），所以这里对齐 `agents/spawn.py` 的 `_auto_approve`：委派出去之后，
 外部 agent 内部的确认全部自动放行，不做二次拦截。
+
+尽管上一段解释了为什么遵从协议的 agent 基本不会调用 `read_text_file`/`write_text_file`，
+`_AcpSessionClient` 仍然给这两个方法接入可选的 `path_sandbox: PathSandbox`——防御"不完全遵从
+协议但仍尝试发起文件 I/O 请求"的外部 agent（`ClientCapabilities` 只是声明,不是强制约束，
+SDK 不会替我们拦下违反声明的请求）。拒绝时用 `RequestError.invalid_params`：ACP 错误码里没有
+专门对应"路径不在允许范围"的语义，这是几个通用错误码里最贴切的一个。
+
+握手重试：`_handshake()`（进程启动 + `initialize` + `new_session`）失败会换一个全新子进程、
+按 `brain/backoff.py` 的指数退避重试有限次数——这个阶段任何内容都还没有流出给 UI，重试不会
+产生重复/错乱的可见输出。一旦握手成功进入 `conn.prompt()`，就不再属于握手范围，遵循
+`providers/retry.py` 定下的规则：内容已经开始流出后不重试。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +64,14 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
+from miku_on_desk.brain.backoff import (
+    DEFAULT_BASE_DELAY_S,
+    DEFAULT_MAX_DELAY_S,
+    DEFAULT_MAX_RETRIES,
+    backoff_delay,
+)
+from miku_on_desk.brain.tools.path_sandbox import PathSandbox
+
 logger = logging.getLogger(__name__)
 
 _CLIENT_NAME = "miku-on-desk"
@@ -70,9 +90,15 @@ class AcpTurnResult:
 class _AcpSessionClient:
     """满足 `acp.interfaces.Client` Protocol 的最小实现，只服务单次 `run_acp_task` 调用。"""
 
-    def __init__(self, on_chunk: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        on_chunk: Callable[[str], None] | None = None,
+        *,
+        path_sandbox: PathSandbox | None = None,
+    ) -> None:
         self._chunks: list[str] = []
         self._on_chunk = on_chunk
+        self._path_sandbox = path_sandbox
 
     @property
     def text(self) -> str:
@@ -107,6 +133,7 @@ class _AcpSessionClient:
         line: int | None = None,
         **kwargs: Any,
     ) -> ReadTextFileResponse:
+        self._check_sandbox(path)
         try:
             text = Path(path).read_text(encoding="utf-8")
         except OSError as exc:
@@ -121,8 +148,16 @@ class _AcpSessionClient:
     async def write_text_file(
         self, content: str, path: str, session_id: str, **kwargs: Any
     ) -> WriteTextFileResponse | None:
+        self._check_sandbox(path)
         Path(path).write_text(content, encoding="utf-8")
         return None
+
+    def _check_sandbox(self, raw_path: str) -> None:
+        if self._path_sandbox is None:
+            return
+        result = self._path_sandbox.check(Path(raw_path))
+        if not result.allowed:
+            raise RequestError.invalid_params(data={"path": raw_path, "reason": result.reason})
 
     async def create_terminal(
         self,
@@ -166,6 +201,31 @@ class _AcpSessionClient:
         return None
 
 
+async def _handshake(
+    *,
+    client: _AcpSessionClient,
+    executable: str,
+    args: Sequence[str],
+    cwd: str,
+    env: Mapping[str, str] | None,
+    stack: AsyncExitStack,
+) -> tuple[Agent, str]:
+    """进入 `spawn_agent_process` 上下文并完成 `initialize` + `new_session`。
+
+    整个子进程生命周期都挂在 `stack` 上——握手失败时调用方 `await stack.aclose()` 即可
+    干净地杀掉这次进程，换一个新的 `AsyncExitStack` 重新调用本函数重试。
+    """
+    conn, _process = await stack.enter_async_context(
+        spawn_agent_process(client, executable, *args, cwd=cwd, env=env)
+    )
+    await conn.initialize(
+        protocol_version=PROTOCOL_VERSION,
+        client_info=Implementation(name=_CLIENT_NAME, version=_CLIENT_VERSION),
+    )
+    session = await conn.new_session(cwd=cwd, mcp_servers=[])
+    return conn, session.session_id
+
+
 async def _run_turn(
     *,
     executable: str,
@@ -174,21 +234,43 @@ async def _run_turn(
     task: str,
     env: Mapping[str, str] | None,
     on_chunk: Callable[[str], None] | None,
+    path_sandbox: PathSandbox | None = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    base_delay_s: float = DEFAULT_BASE_DELAY_S,
+    max_delay_s: float = DEFAULT_MAX_DELAY_S,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AcpTurnResult:
-    client = _AcpSessionClient(on_chunk=on_chunk)
-    async with spawn_agent_process(client, executable, *args, cwd=cwd, env=env) as (conn, _process):
-        await conn.initialize(
-            protocol_version=PROTOCOL_VERSION,
-            client_info=Implementation(name=_CLIENT_NAME, version=_CLIENT_VERSION),
-        )
-        session = await conn.new_session(cwd=cwd, mcp_servers=[])
-        response = await conn.prompt(prompt=[text_block(task)], session_id=session.session_id)
+    client = _AcpSessionClient(on_chunk=on_chunk, path_sandbox=path_sandbox)
 
-    success = response.stop_reason == "end_turn"
-    error = None if success else f"ACP 任务未正常结束（stop_reason={response.stop_reason}）"
-    return AcpTurnResult(
-        success=success, content=client.text, error=error, stop_reason=response.stop_reason
-    )
+    attempt = 0
+    while True:
+        async with AsyncExitStack() as stack:
+            try:
+                conn, session_id = await _handshake(
+                    client=client, executable=executable, args=args, cwd=cwd, env=env, stack=stack
+                )
+            except Exception:
+                if attempt >= max_retries:
+                    raise
+                delay = backoff_delay(attempt, base_delay_s=base_delay_s, max_delay_s=max_delay_s)
+                logger.warning(
+                    'ACP 握手第 %d 次失败，%.2f 秒后换一个新进程重试："%s"',
+                    attempt + 1,
+                    delay,
+                    executable,
+                    exc_info=True,
+                )
+                await sleep(delay)
+                attempt += 1
+                continue
+
+            response = await conn.prompt(prompt=[text_block(task)], session_id=session_id)
+
+        success = response.stop_reason == "end_turn"
+        error = None if success else f"ACP 任务未正常结束（stop_reason={response.stop_reason}）"
+        return AcpTurnResult(
+            success=success, content=client.text, error=error, stop_reason=response.stop_reason
+        )
 
 
 async def run_acp_task(
@@ -200,16 +282,37 @@ async def run_acp_task(
     env: Mapping[str, str] | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     on_chunk: Callable[[str], None] | None = None,
+    path_sandbox: PathSandbox | None = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    base_delay_s: float = DEFAULT_BASE_DELAY_S,
+    max_delay_s: float = DEFAULT_MAX_DELAY_S,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AcpTurnResult:
     """启动 `executable`（ACP 模式的外部 agent 进程），委派一次任务，返回其最终回复文本。
 
     `on_chunk` 在每次收到一个消息分片时同步调用一次，用于把长时间委派期间的中间输出实时
     转发给 UI；不影响 `client.text` 这个最终兜底缓冲区，两者并行写入。
+
+    `path_sandbox` 为 None 时（默认）不做任何拦截，与接入前行为一致；传入后为
+    `_AcpSessionClient.read_text_file`/`write_text_file` 接入结构性边界，见模块文档。
+
+    `max_retries`/`base_delay_s`/`max_delay_s`/`sleep` 只影响握手阶段（进程启动到
+    `new_session` 之间）的重试；一旦进入 `prompt()`，失败就直接返回，不重试。
     """
     try:
         return await asyncio.wait_for(
             _run_turn(
-                executable=executable, args=args, cwd=cwd, task=task, env=env, on_chunk=on_chunk
+                executable=executable,
+                args=args,
+                cwd=cwd,
+                task=task,
+                env=env,
+                on_chunk=on_chunk,
+                path_sandbox=path_sandbox,
+                max_retries=max_retries,
+                base_delay_s=base_delay_s,
+                max_delay_s=max_delay_s,
+                sleep=sleep,
             ),
             timeout=timeout_s,
         )

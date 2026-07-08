@@ -24,6 +24,7 @@ from miku_on_desk.brain.providers.base import (
     ToolUseBlock,
 )
 from miku_on_desk.bridge.events import (
+    BrainCrashed,
     BrainEventBus,
     CancellationGate,
     ConfirmationGate,
@@ -95,6 +96,56 @@ def _build_loop_callbacks_for_test(
     )
 
 
+def test_build_loop_callbacks_forwards_compaction_tuning_to_make_compact_context(
+    monkeypatch: pytest.MonkeyPatch, system: MemorySystem
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_make_compact_context(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "miku_on_desk.bridge.events.make_compact_context", _fake_make_compact_context
+    )
+
+    build_loop_callbacks(
+        BrainEventBus(),
+        ConfirmationGate(BrainEventBus()),
+        QueuedMessageQueue(),
+        session_id="s1",
+        router=_make_router(),
+        providers={ProviderName.ANTHROPIC: _StubProvider()},
+        memory_system=system,
+        token_threshold=12_345,
+        keep_recent=2,
+    )
+
+    assert captured["token_threshold"] == 12_345
+    assert captured["keep_recent"] == 2
+
+
+def test_build_loop_callbacks_omits_compaction_tuning_kwargs_when_not_given(
+    monkeypatch: pytest.MonkeyPatch, system: MemorySystem
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_make_compact_context(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "miku_on_desk.bridge.events.make_compact_context", _fake_make_compact_context
+    )
+
+    _build_loop_callbacks_for_test(
+        BrainEventBus(), ConfirmationGate(BrainEventBus()), QueuedMessageQueue(), system
+    )
+
+    assert "token_threshold" not in captured
+    assert "keep_recent" not in captured
+
+
 def test_emit_event_delivers_to_connected_slot() -> None:
     bus, captured = _make_bus_with_capture()
 
@@ -109,6 +160,14 @@ def test_emit_event_delivers_reaction_triggered() -> None:
     bus.emit_event(ReactionTriggered(kind=ReactionKind.HAPPY))
 
     assert captured == [ReactionTriggered(kind=ReactionKind.HAPPY)]
+
+
+def test_emit_event_delivers_brain_crashed() -> None:
+    bus, captured = _make_bus_with_capture()
+
+    bus.emit_event(BrainCrashed(error="炸了"))
+
+    assert captured == [BrainCrashed(error="炸了")]
 
 
 async def test_confirmation_gate_round_trip_returns_approval() -> None:

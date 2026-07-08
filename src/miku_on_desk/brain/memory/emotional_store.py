@@ -1,17 +1,20 @@
-"""`emotional` 层：整文件 JSON 存储的用户偏好与信任模型，对齐设计文档 §4.3。
+"""`emotional` 层：整文件 JSON 存储的用户偏好与信任模型。
 
 只做原子读写，不做合并/更新的语义决策（该改哪个叶子、`last_updated` 该设成什么值）——
 那是 `extraction.py` 编排层的职责，跟 `semantic_store.py`/`episodic_store.py` 保持一致的
 "哑"存储层定位，方便独立测试。
 
-`trust_model.json` 的 `decay_model` 字段只保留设计文档 schema 占位，不做时间衰减的实际
-计算（计划文档「明确排除在本次范围外」一节已列出这一限定范围）。
+`trust_model.json` 的 `decay_model` 字段只保留 schema 占位，不做时间衰减的实际计算。
+
+`MemorySystem` 会被 UI 线程和 Brain 线程共享同一个实例，公开方法内部用
+`threading.RLock()` 互斥，理由同 `base_store.py` 模块文档。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, cast
@@ -55,20 +58,29 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 class EmotionalStore:
     """`emotional` 层存储：`preferences.json` + `trust_model.json`，整文件原子重写。"""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, default_confidence_threshold: float = 0.75) -> None:
         self._root = root
         self._preferences_path = root / "preferences.json"
         self._trust_model_path = root / "trust_model.json"
+        self._default_preferences: dict[str, Any] = {
+            **_DEFAULT_PREFERENCES,
+            "confidence_threshold": default_confidence_threshold,
+        }
         self._root.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
     def load_preferences(self) -> dict[str, Any]:
-        return _read_json(self._preferences_path, _DEFAULT_PREFERENCES)
+        with self._lock:
+            return _read_json(self._preferences_path, self._default_preferences)
 
     def save_preferences(self, data: dict[str, Any]) -> None:
-        _write_json(self._preferences_path, data)
+        with self._lock:
+            _write_json(self._preferences_path, data)
 
     def load_trust_model(self) -> dict[str, Any]:
-        return _read_json(self._trust_model_path, _DEFAULT_TRUST_MODEL)
+        with self._lock:
+            return _read_json(self._trust_model_path, _DEFAULT_TRUST_MODEL)
 
     def save_trust_model(self, data: dict[str, Any]) -> None:
-        _write_json(self._trust_model_path, data)
+        with self._lock:
+            _write_json(self._trust_model_path, data)

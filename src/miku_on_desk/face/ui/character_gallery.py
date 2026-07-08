@@ -75,7 +75,6 @@ class CharacterStandTile(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
-        self._timer.start(_TICK_MS)
 
     def _on_tick(self) -> None:
         self._elapsed_ms += _TICK_MS
@@ -86,6 +85,18 @@ class CharacterStandTile(QWidget):
             loop=True,
         )
         self._sprite.set_frame(self._state, frame)
+
+    def showEvent(self, event: object) -> None:
+        del event
+        if not self._timer.isActive():
+            self._timer.start(_TICK_MS)
+
+    def hideEvent(self, event: object) -> None:
+        """画廊面板整体隐藏/关闭时，Qt 会向所有可见子 widget 级联发出隐藏事件——借此
+        暂停动画 tick，避免画廊关闭后展台仍在后台空转消耗 CPU。
+        """
+        del event
+        self._timer.stop()
 
     def enterEvent(self, event: object) -> None:
         del event

@@ -81,6 +81,17 @@ class LoopFinished:
     result: LoopResult
 
 
+@dataclass(frozen=True)
+class BrainCrashed:
+    """Brain 线程的 asyncio 事件循环整体异常退出（而非某一轮 loop 内部的可恢复错误）。
+
+    退出后 Brain 线程已经终止，UI 侧不会再收到任何后续事件——展示这条消息本身即是最后
+    一次机会，需要让用户知道发生了什么，而不是让桌宠停留在最后状态一动不动。
+    """
+
+    error: str
+
+
 class ReactionKind(StrEnum):
     """``express_reaction`` 工具可选的反应类型，1:1 映射到 4 个瞬态兼容的 ``PetState``。"""
 
@@ -105,6 +116,7 @@ BrainEvent = (
     | QueuedMessageInjected
     | LoopFinished
     | ReactionTriggered
+    | BrainCrashed
 )
 
 
@@ -207,8 +219,15 @@ def build_loop_callbacks(
     router: ModelRouter,
     providers: dict[ProviderName, Provider],
     memory_system: MemorySystem,
+    token_threshold: int | None = None,
+    keep_recent: int | None = None,
 ) -> LoopCallbacks:
     """把 loop.py 的回调协议整体接到事件总线 + 确认闸门 + 排队消息队列上。"""
+    compact_kwargs: dict[str, int] = {}
+    if token_threshold is not None:
+        compact_kwargs["token_threshold"] = token_threshold
+    if keep_recent is not None:
+        compact_kwargs["keep_recent"] = keep_recent
     return LoopCallbacks(
         confirm=confirm_gate.request,
         on_content=lambda text: bus.emit_event(ContentDelta(text)),
@@ -222,5 +241,6 @@ def build_loop_callbacks(
             router=router,
             providers=providers,
             memory_system=memory_system,
+            **compact_kwargs,
         ),
     )

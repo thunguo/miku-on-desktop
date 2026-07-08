@@ -9,7 +9,7 @@ import pytest
 
 from miku_on_desk.brain.memory.models import Entity, Fact, MemoryUnit
 from miku_on_desk.brain.memory.system import MemorySystem, default_memory_system
-from miku_on_desk.config.settings import EnvBootstrap
+from miku_on_desk.config.settings import EnvBootstrap, MemoryTuningConfig
 
 
 @pytest.fixture
@@ -83,6 +83,29 @@ def test_default_memory_system_falls_back_to_bootstrap_data_dir(tmp_path: Path) 
     system = default_memory_system(None, bootstrap)
 
     assert system.root == tmp_path / "memory"
+
+
+def test_memory_system_threads_tuning_into_base_and_emotional_stores(tmp_path: Path) -> None:
+    tuning = MemoryTuningConfig(
+        base_similarity_threshold=0.42, emotional_confidence_threshold=0.13
+    )
+
+    system = MemorySystem(tmp_path / "memory", tuning=tuning)
+
+    assert system.base._default_similarity_threshold == 0.42
+    assert system.emotional.load_preferences()["confidence_threshold"] == 0.13
+
+
+def test_memory_system_without_explicit_tuning_uses_config_defaults(tmp_path: Path) -> None:
+    system = MemorySystem(tmp_path / "memory")
+
+    assert (
+        system.base._default_similarity_threshold == MemoryTuningConfig().base_similarity_threshold
+    )
+    assert (
+        system.emotional.load_preferences()["confidence_threshold"]
+        == MemoryTuningConfig().emotional_confidence_threshold
+    )
 
 
 # ── add_memory_unit ──────────────────────────────────────────────────────
@@ -170,6 +193,25 @@ def test_retrieve_assembles_readable_context_block(system: MemorySystem) -> None
     text = system.retrieve("上海")
 
     assert "已知事实" in text
+
+
+def test_retrieve_uses_configured_min_confidence_threshold(tmp_path: Path) -> None:
+    now = "2026-07-06T09:00:00+00:00"
+    low_confidence_fact = _make_fact(
+        subject="用户", predicate="住在", object_="上海", confidence=0.3, now=now
+    )
+
+    strict_system = MemorySystem(
+        tmp_path / "strict", tuning=MemoryTuningConfig(retrieval_min_confidence=0.5)
+    )
+    strict_system.semantic.upsert_fact(low_confidence_fact)
+    assert "上海" not in strict_system.retrieve("上海")
+
+    lenient_system = MemorySystem(
+        tmp_path / "lenient", tuning=MemoryTuningConfig(retrieval_min_confidence=0.1)
+    )
+    lenient_system.semantic.upsert_fact(low_confidence_fact)
+    assert "上海" in lenient_system.retrieve("上海")
 
 
 # ── run_consolidation ────────────────────────────────────────────────────

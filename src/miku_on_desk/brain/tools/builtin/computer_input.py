@@ -7,9 +7,8 @@
 从不直接 import `hands_eyes`。
 
 `ToolPolicySpec(requires_confirmation=True)`：这个工具会在用户自己的电脑上产生真实的鼠标/
-键盘/进程副作用，主计划 Phase 3 的验收标准明确要求执行前必须弹出确认气泡——即使全局
-`trusted_mode=True` 也不豁免，这是 `policy.py` 里"requires_confirmation 必须在信任层判断
-之前生效"规则存在的原因之一。
+键盘/进程副作用，执行前必须弹出确认气泡——即使全局 `trusted_mode=True` 也不豁免，这是
+`policy.py` 里"requires_confirmation 必须在信任层判断之前生效"规则存在的原因之一。
 
 `PlatformBackend` 的方法都是同步阻塞调用（pynput/psutil/subprocess），必须用
 ``run_in_executor`` 丢给线程池，否则会卡住 Brain 的 asyncio 事件循环。

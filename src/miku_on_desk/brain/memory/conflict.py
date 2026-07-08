@@ -1,13 +1,11 @@
-"""跨事实的冲突检测与消解，照搬设计文档 §5.2/§7.3 伪代码。
+"""跨事实的冲突检测与消解。
 
 两处针对本项目实际 schema 的必要简化：
-1. 设计文档 §5.2 的 `temporal_overlap` 假设 Fact 有一段"有效期区间"，但 §4.2 schema 只有
-   `valid_from`（时间点）没有 `valid_to`（区间终点）——本次不新增 `valid_to` 字段，把
-   "时间重叠"简化为"既有事实是否仍处于 active 状态、且早于新事实"这一可判定的点时间近似
-   （见 `_temporal_overlap`）。
-2. §7.3 伪代码把"标记被取代事实"写成 `semantic.mark_superseded(old, new)`，但 Fact
-   schema 没有 `superseded_by` 反向引用字段（只有 `status` 状态机），这里直接用
-   `SemanticStore.upsert_fact` 把败者的 `status` 原地改写成 `superseded`，不新增字段。
+1. Fact 只有 `valid_from`（时间点），没有"有效期区间"的 `valid_to`（区间终点）——本次不新增
+   `valid_to` 字段，把"时间重叠"简化为"既有事实是否仍处于 active 状态、且早于新事实"这一
+   可判定的点时间近似（见 `_temporal_overlap`）。
+2. Fact schema 没有 `superseded_by` 反向引用字段（只有 `status` 状态机），标记被取代事实
+   直接用 `SemanticStore.upsert_fact` 把败者的 `status` 原地改写成 `superseded`，不新增字段。
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ _TEMPORAL_PREDICATE_KEYWORDS = ("住", "居住", "工作", "任职", "就读", "
 
 @dataclass(frozen=True)
 class Conflict:
-    """一次冲突检测命中，字段对齐设计文档 §5.2 伪代码里 `detect_conflicts` 的返回形状。"""
+    """一次冲突检测命中。"""
 
     type: ConflictType
     existing: Fact
@@ -43,7 +41,7 @@ def _temporal_overlap(existing: Fact, new: Fact) -> bool:
 
 
 def detect_conflicts(new_fact: Fact, existing_facts: list[Fact]) -> list[Conflict]:
-    """对齐设计文档 §5.2 伪代码：同主谓不同宾语的取值冲突 + 时间性谓语的时间冲突。"""
+    """同主谓不同宾语的取值冲突 + 时间性谓语的时间冲突。"""
     conflicts: list[Conflict] = []
     for fact in existing_facts:
         if fact.status != "active" or fact.id == new_fact.id:
@@ -78,7 +76,7 @@ def detect_conflicts(new_fact: Fact, existing_facts: list[Fact]) -> list[Conflic
 
 
 def resolve_conflicts(facts: list[Fact], *, semantic: SemanticStore) -> list[Fact]:
-    """对齐设计文档 §7.3 伪代码：按 (subject, predicate) 分组，高置信度优先、僵持时取更新者胜出。"""
+    """按 (subject, predicate) 分组，高置信度优先、僵持时取更新者胜出。"""
     groups: dict[tuple[str, str], list[Fact]] = defaultdict(list)
     for fact in facts:
         groups[(fact.subject, fact.predicate)].append(fact)

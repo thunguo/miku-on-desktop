@@ -63,7 +63,7 @@ class HookEvent(BaseModel):
     def from_raw(cls, raw: dict[str, Any]) -> HookEvent:
         """``event``是本项目自定义的字段名；同时兼容 Claude Code 官方 hook payload
         实际使用的 ``hook_event_name`` 字段——两者具体以哪个为准，需要在真实 Claude
-        Code 环境里验证后再收窄（见实施计划 Phase 7）。
+        Code 环境里验证后再收窄。
         """
         event = raw.get("event") or raw.get("hook_event_name") or ""
         return cls(

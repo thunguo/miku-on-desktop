@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from platformdirs import PlatformDirs
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from miku_on_desk.brain.secrets.vault import SecretVault
 
 _APP_NAME = "miku-on-desk"
 _APP_AUTHOR = "miku-on-desk"
@@ -118,6 +121,9 @@ class McpServerConfig(BaseModel):
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
+    trusted: bool = False
+    """用户显式标记为可信时，豁免该 server 桥接工具的 `requires_confirmation`——但不豁免
+    路径沙箱/先读后改这两条结构性边界，见 `brain/mcp/host.py::_infer_policy_spec`。"""
 
 
 class AgentProfileConfig(BaseModel):
@@ -144,6 +150,36 @@ class LongTaskConfig(BaseModel):
 
     spawn_agents_deadline_s: float = 600.0
     acp_delegate_default_timeout_s: float = 900.0
+
+
+class LoopBehaviorConfig(BaseModel):
+    """``brain/loop.py::LoopConfig`` 的用户可配置镜像，字段含义与默认值与其一一对应。"""
+
+    max_tool_rounds: int = 100
+    idle_timeout_s: float = 120.0
+    hard_timeout_s: float = 600.0
+    budget_caution_remaining: int = 10
+    budget_critical_remaining: int = 3
+    deadline_s: float | None = None
+    time_caution_remaining_s: float = 60.0
+    time_critical_remaining_s: float = 20.0
+
+
+class MemoryTuningConfig(BaseModel):
+    """记忆检索/整理/屏幕匹配相关阈值，默认值与原硬编码常量一致。
+
+    多数字段目前只被生产代码里已有的活跃调用链（compaction/screen_analyze）消费；
+    ``retrieval_min_confidence``/``base_similarity_threshold``/
+    ``emotional_confidence_threshold`` 对应的方法当前没有生产调用点（仅测试直接调用），
+    先做成可配置项，供未来接入真实调用路径时复用。
+    """
+
+    retrieval_min_confidence: float = 0.7
+    base_similarity_threshold: float = 0.80
+    emotional_confidence_threshold: float = 0.75
+    compaction_token_threshold: int = 60_000
+    compaction_keep_recent: int = 6
+    screen_match_threshold: float = 0.6
 
 
 class PermissionsConfig(BaseModel):
@@ -238,6 +274,8 @@ class AppSettings(BaseModel):
     persona: PersonaConfig = Field(default_factory=PersonaConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     long_tasks: LongTaskConfig = Field(default_factory=LongTaskConfig)
+    loop_behavior: LoopBehaviorConfig = Field(default_factory=LoopBehaviorConfig)
+    memory_tuning: MemoryTuningConfig = Field(default_factory=MemoryTuningConfig)
 
     @classmethod
     def load(cls, path: Path) -> AppSettings:
@@ -253,3 +291,82 @@ class AppSettings(BaseModel):
 def default_settings_path(bootstrap: EnvBootstrap | None = None) -> Path:
     bootstrap = bootstrap or EnvBootstrap()
     return bootstrap.resolve_config_dir() / "settings.json"
+
+
+_VAULT_REF_PREFIX = "vault-ref:"
+_IMAGE_GENERATION_VAULT_KEY = "image_generation_api_key"
+
+
+def _provider_vault_key(name: ProviderName) -> str:
+    return f"provider_api_key:{name.value}"
+
+
+def _vault_ref(vault_key: str) -> str:
+    return f"{_VAULT_REF_PREFIX}{vault_key}"
+
+
+def _migrate_or_resolve(
+    value: str | None, vault_key: str, vault: SecretVault
+) -> tuple[str | None, bool]:
+    """返回 `(明文值, 是否是本次触发迁移的遗留明文)`。
+
+    命中 vault-ref 前缀时直接解密返回；否则视为旧版明文配置，立即存入 vault 并把
+    第二个返回值置 True，提示调用方磁盘上的引用尚未落地，需要触发一次
+    ``save_settings_with_vault`` 把明文改写成引用。
+    """
+    if value is None:
+        return None, False
+    if value.startswith(_VAULT_REF_PREFIX):
+        return vault.get(value.removeprefix(_VAULT_REF_PREFIX)), False
+    vault.store(vault_key, value)
+    return value, True
+
+
+def load_settings_with_vault(path: Path, vault: SecretVault) -> AppSettings:
+    """加载 settings，并把发现的旧版明文 api_key 自动迁移进 vault、磁盘上改写为引用。
+
+    返回值里的 api_key 字段始终是解密后的明文，供调用方（如 Provider 构造）直接使用；
+    磁盘上则只留 ``vault-ref:<key>`` 引用，不会因为这次加载而新增明文。
+    """
+    settings = AppSettings.load(path)
+    migrated = False
+
+    for name in ProviderName:
+        provider = settings.model_router.provider(name)
+        provider.api_key, was_migrated = _migrate_or_resolve(
+            provider.api_key, _provider_vault_key(name), vault
+        )
+        migrated = migrated or was_migrated
+
+    settings.image_generation.api_key, image_migrated = _migrate_or_resolve(
+        settings.image_generation.api_key, _IMAGE_GENERATION_VAULT_KEY, vault
+    )
+    migrated = migrated or image_migrated
+
+    if migrated:
+        save_settings_with_vault(settings, path, vault)
+
+    return settings
+
+
+def save_settings_with_vault(settings: AppSettings, path: Path, vault: SecretVault) -> None:
+    """把 settings 存盘：api_key 字段先存入 vault，磁盘上只留引用。
+
+    在 `settings` 的深拷贝上操作，不修改调用方持有的原始对象——调用方的内存副本需要
+    继续持有明文，供运行时鉴权使用。
+    """
+    disk_copy = settings.model_copy(deep=True)
+
+    for name in ProviderName:
+        provider = disk_copy.model_router.provider(name)
+        if provider.api_key is not None and not provider.api_key.startswith(_VAULT_REF_PREFIX):
+            vault_key = _provider_vault_key(name)
+            vault.store(vault_key, provider.api_key)
+            provider.api_key = _vault_ref(vault_key)
+
+    image_key = disk_copy.image_generation.api_key
+    if image_key is not None and not image_key.startswith(_VAULT_REF_PREFIX):
+        vault.store(_IMAGE_GENERATION_VAULT_KEY, image_key)
+        disk_copy.image_generation.api_key = _vault_ref(_IMAGE_GENERATION_VAULT_KEY)
+
+    disk_copy.save(path)

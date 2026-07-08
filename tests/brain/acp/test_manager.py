@@ -195,3 +195,32 @@ async def test_execute_forwards_agent_specific_timeout_override(
     )
 
     assert captured["timeout_s"] == 7.0
+
+
+async def test_execute_forwards_path_sandbox_to_run_acp_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _make_bare_registry(tmp_path)
+    sandbox = PathSandbox(
+        cwd=tmp_path / "cwd", output_dir=tmp_path / "output", data_dir=tmp_path / "data"
+    )
+    register_acp_delegate_tool(AcpManager([_ENABLED]), registry, path_sandbox=sandbox)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_run_acp_task(**kwargs: object) -> AcpTurnResult:
+        captured.update(kwargs)
+        return AcpTurnResult(success=True, content="完成了", error=None, stop_reason="end_turn")
+
+    monkeypatch.setattr(acp_manager_module, "run_acp_task", _fake_run_acp_task)
+
+    await registry.execute(
+        ToolUseBlock(
+            id="call1",
+            name="acp_delegate",
+            input={"agent": "claude-code", "task": "写个测试", "cwd": str(tmp_path / "cwd")},
+        ),
+        session_id="s1",
+    )
+
+    assert captured["path_sandbox"] is sandbox

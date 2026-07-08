@@ -13,6 +13,12 @@
 第 2、3 层特意放在第 4、5 层之前："这个工具是否已经拿到过许可"和"这条路径/命令本身是否安全"
 必须是两个独立维度,信任层只能把原本会问用户的情形提升为直接放行，绝不能用来豁免路径沙箱或
 先读后改这两条结构性边界——否则一次工具级别的信任授予会连带打穿沙箱本身。
+
+``evaluate()`` 不区分工具来源：MCP 桥接工具（`mcp/host.py::_infer_policy_spec`）产出的
+``ToolPolicySpec`` 和 builtin 工具手写的一样，走的是同一套判断顺序，没有为"这是 MCP 工具"
+开任何后门。``McpServerConfig.trusted`` 也只能影响 spec 里的 ``requires_confirmation``
+（第 4 层），改变不了第 2、3 层的结构性边界——一个被标记为可信的 MCP server，其工具的路径
+参数依然要过 `path_sandbox`/`read_tracker`。
 """
 
 from __future__ import annotations

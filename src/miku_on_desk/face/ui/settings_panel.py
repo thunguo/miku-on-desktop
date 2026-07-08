@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QKeySequence
@@ -52,8 +52,13 @@ from miku_on_desk.config.settings import (
     PersonaConfig,
     ProviderConfig,
     ProviderName,
+    save_settings_with_vault,
 )
 from miku_on_desk.face.ui.theme import RADIUS_MD, WARNING_COLOR
+
+if TYPE_CHECKING:
+    from miku_on_desk.brain.secrets.vault import SecretVault
+
 
 _PROVIDER_LABELS = {
     ProviderName.ANTHROPIC: "Anthropic",
@@ -144,11 +149,17 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
     settings_saved = Signal(object)
 
     def __init__(
-        self, settings: AppSettings, settings_path: Path, parent: QWidget | None = None
+        self,
+        settings: AppSettings,
+        settings_path: Path,
+        parent: QWidget | None = None,
+        *,
+        vault: SecretVault | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings.model_copy(deep=True)
         self._settings_path = settings_path
+        self._vault = vault
 
         self._provider_widgets: dict[ProviderName, _ProviderFormWidgets] = {}
         self._persona_name_edit = LineEdit(self)
@@ -175,6 +186,16 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._proactive_quiet_start_edit = LineEdit(self)
         self._proactive_quiet_end_edit = LineEdit(self)
         self._proactive_max_daily_edit = LineEdit(self)
+        self._enable_cross_provider_fallback_box = CheckBox("允许跨 Provider 降级", self)
+        self._include_experimental_box = CheckBox("启用实验性 Hook 事件", self)
+        self._max_tool_rounds_edit = LineEdit(self)
+        self._idle_timeout_edit = LineEdit(self)
+        self._hard_timeout_edit = LineEdit(self)
+        self._budget_caution_remaining_edit = LineEdit(self)
+        self._budget_critical_remaining_edit = LineEdit(self)
+        self._deadline_edit = LineEdit(self)
+        self._time_caution_remaining_edit = LineEdit(self)
+        self._time_critical_remaining_edit = LineEdit(self)
 
         self._mcp_editor = _McpServerListEditor(self._settings.mcp_servers, self)
         self._agent_editor = _AgentProfileListEditor(self._settings.agent_profiles, self)
@@ -188,6 +209,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         window_tab = self._build_window_tab()
         shortcuts_tab = self._build_shortcuts_tab()
         proactive_tab = self._build_proactive_tab()
+        advanced_tab = self._build_advanced_tab()
         for widget, object_name in (
             (providers_tab, "providerTab"),
             (persona_tab, "personaTab"),
@@ -200,6 +222,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
             (window_tab, "windowTab"),
             (shortcuts_tab, "shortcutsTab"),
             (proactive_tab, "proactiveTab"),
+            (advanced_tab, "advancedTab"),
         ):
             widget.setObjectName(object_name)
         self.addSubInterface(providers_tab, FluentIcon.CLOUD, "Provider")
@@ -213,6 +236,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self.addSubInterface(window_tab, FluentIcon.LAYOUT, "窗口")
         self.addSubInterface(shortcuts_tab, FluentIcon.COMMAND_PROMPT, "快捷键")
         self.addSubInterface(proactive_tab, FluentIcon.MEGAPHONE, "主动交互")
+        self.addSubInterface(advanced_tab, FluentIcon.DEVELOPER_TOOLS, "高级")
 
         self._load_persona()
         self._load_permissions()
@@ -221,6 +245,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._load_window()
         self._load_shortcuts()
         self._load_proactive()
+        self._load_advanced()
 
         save_button = PrimaryPushButton("保存", self)
         save_button.clicked.connect(self._on_save_clicked)
@@ -262,6 +287,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_window()
         self._collect_shortcuts()
         self._collect_proactive()
+        self._collect_advanced()
         return self._settings.model_copy(deep=True)
 
     def _add_numeric_validation(
@@ -646,9 +672,165 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
             self._proactive_max_daily_edit.text(), default=proactive.max_daily_triggers
         )
 
+    def _build_advanced_tab(self) -> QWidget:
+        outer = QWidget()
+        layout = QVBoxLayout(outer)
+
+        router_card = HeaderCardWidget("模型路由", self)
+        router_container = QWidget(router_card)
+        router_form = QFormLayout(router_container)
+        router_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        router_form.addRow(self._enable_cross_provider_fallback_box)
+        router_card.viewLayout.addWidget(router_container)
+        layout.addWidget(router_card)
+
+        hook_card = HeaderCardWidget("Hook Server", self)
+        hook_container = QWidget(hook_card)
+        hook_form = QFormLayout(hook_container)
+        hook_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        hook_form.addRow(self._include_experimental_box)
+        hook_card.viewLayout.addWidget(hook_container)
+        layout.addWidget(hook_card)
+
+        loop_card = HeaderCardWidget("AI 循环参数", self)
+        loop_container = QWidget(loop_card)
+        loop_form = QFormLayout(loop_container)
+        loop_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        loop_form.addRow("最大工具调用回合数", self._max_tool_rounds_edit)
+        self._max_tool_rounds_warning = self._add_numeric_validation(
+            self._max_tool_rounds_edit,
+            _is_valid_int,
+            lambda: self._settings.loop_behavior.max_tool_rounds,
+        )
+        loop_form.addRow(self._max_tool_rounds_warning)
+
+        loop_form.addRow("单轮响应空闲超时（秒）", self._idle_timeout_edit)
+        self._idle_timeout_warning = self._add_numeric_validation(
+            self._idle_timeout_edit,
+            _is_valid_float,
+            lambda: self._settings.loop_behavior.idle_timeout_s,
+        )
+        loop_form.addRow(self._idle_timeout_warning)
+
+        loop_form.addRow("单轮请求硬超时（秒）", self._hard_timeout_edit)
+        self._hard_timeout_warning = self._add_numeric_validation(
+            self._hard_timeout_edit,
+            _is_valid_float,
+            lambda: self._settings.loop_behavior.hard_timeout_s,
+        )
+        loop_form.addRow(self._hard_timeout_warning)
+
+        loop_form.addRow("回合预算提醒阈值（剩余回合数）", self._budget_caution_remaining_edit)
+        self._budget_caution_remaining_warning = self._add_numeric_validation(
+            self._budget_caution_remaining_edit,
+            _is_valid_int,
+            lambda: self._settings.loop_behavior.budget_caution_remaining,
+        )
+        loop_form.addRow(self._budget_caution_remaining_warning)
+
+        loop_form.addRow("回合预算紧急阈值（剩余回合数）", self._budget_critical_remaining_edit)
+        self._budget_critical_remaining_warning = self._add_numeric_validation(
+            self._budget_critical_remaining_edit,
+            _is_valid_int,
+            lambda: self._settings.loop_behavior.budget_critical_remaining,
+        )
+        loop_form.addRow(self._budget_critical_remaining_warning)
+
+        loop_form.addRow("墙钟截止时间（秒，留空=不限时）", self._deadline_edit)
+
+        loop_form.addRow("时间预算提醒阈值（剩余秒数）", self._time_caution_remaining_edit)
+        self._time_caution_remaining_warning = self._add_numeric_validation(
+            self._time_caution_remaining_edit,
+            _is_valid_float,
+            lambda: self._settings.loop_behavior.time_caution_remaining_s,
+        )
+        loop_form.addRow(self._time_caution_remaining_warning)
+
+        loop_form.addRow("时间预算紧急阈值（剩余秒数）", self._time_critical_remaining_edit)
+        self._time_critical_remaining_warning = self._add_numeric_validation(
+            self._time_critical_remaining_edit,
+            _is_valid_float,
+            lambda: self._settings.loop_behavior.time_critical_remaining_s,
+        )
+        loop_form.addRow(self._time_critical_remaining_warning)
+
+        loop_form.addRow(CaptionLabel("改动需要重启 Miku 才能生效", loop_container))
+        loop_card.viewLayout.addWidget(loop_container)
+        layout.addWidget(loop_card)
+        layout.addStretch(1)
+
+        scroll_area = SingleDirectionScrollArea(self)
+        scroll_area.setWidget(outer)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea{background: transparent; border: none}")
+        outer.setStyleSheet("QWidget{background: transparent}")
+        return cast(QWidget, scroll_area)
+
+    def _load_advanced(self) -> None:
+        self._enable_cross_provider_fallback_box.setChecked(
+            self._settings.model_router.enable_cross_provider_fallback
+        )
+        self._include_experimental_box.setChecked(self._settings.hook_server.include_experimental)
+        loop_behavior = self._settings.loop_behavior
+        self._max_tool_rounds_edit.setText(str(loop_behavior.max_tool_rounds))
+        self._idle_timeout_edit.setText(str(loop_behavior.idle_timeout_s))
+        self._hard_timeout_edit.setText(str(loop_behavior.hard_timeout_s))
+        self._budget_caution_remaining_edit.setText(str(loop_behavior.budget_caution_remaining))
+        self._budget_critical_remaining_edit.setText(str(loop_behavior.budget_critical_remaining))
+        self._deadline_edit.setText(
+            "" if loop_behavior.deadline_s is None else str(loop_behavior.deadline_s)
+        )
+        self._time_caution_remaining_edit.setText(str(loop_behavior.time_caution_remaining_s))
+        self._time_critical_remaining_edit.setText(str(loop_behavior.time_critical_remaining_s))
+
+    def _collect_advanced(self) -> None:
+        self._settings.model_router.enable_cross_provider_fallback = (
+            self._enable_cross_provider_fallback_box.isChecked()
+        )
+        self._settings.hook_server.include_experimental = (
+            self._include_experimental_box.isChecked()
+        )
+
+        loop_behavior = self._settings.loop_behavior
+        loop_behavior.max_tool_rounds = _parse_int(
+            self._max_tool_rounds_edit.text(), default=loop_behavior.max_tool_rounds
+        )
+        loop_behavior.idle_timeout_s = _parse_float(
+            self._idle_timeout_edit.text(), default=loop_behavior.idle_timeout_s
+        )
+        loop_behavior.hard_timeout_s = _parse_float(
+            self._hard_timeout_edit.text(), default=loop_behavior.hard_timeout_s
+        )
+        loop_behavior.budget_caution_remaining = _parse_int(
+            self._budget_caution_remaining_edit.text(),
+            default=loop_behavior.budget_caution_remaining,
+        )
+        loop_behavior.budget_critical_remaining = _parse_int(
+            self._budget_critical_remaining_edit.text(),
+            default=loop_behavior.budget_critical_remaining,
+        )
+        deadline_text = self._deadline_edit.text().strip()
+        loop_behavior.deadline_s = (
+            _parse_float(deadline_text, default=loop_behavior.deadline_s or 0.0)
+            if deadline_text
+            else None
+        )
+        loop_behavior.time_caution_remaining_s = _parse_float(
+            self._time_caution_remaining_edit.text(),
+            default=loop_behavior.time_caution_remaining_s,
+        )
+        loop_behavior.time_critical_remaining_s = _parse_float(
+            self._time_critical_remaining_edit.text(),
+            default=loop_behavior.time_critical_remaining_s,
+        )
+
     def _on_save_clicked(self) -> None:
         settings = self.current_settings()
-        settings.save(self._settings_path)
+        if self._vault is not None:
+            save_settings_with_vault(settings, self._settings_path, self._vault)
+        else:
+            settings.save(self._settings_path)
         self._settings = settings
         self.settings_saved.emit(settings)
         InfoBar.success(title="已保存", content="设置已保存", parent=self, duration=2000)
@@ -712,6 +894,9 @@ class _McpServerListEditor(QWidget):
         self._headers_edit = PlainTextEdit(self)
         self._enabled_box = CheckBox("启用", self)
         self._enabled_box.setChecked(True)
+        self._trusted_box = CheckBox(
+            "信任此 MCP server（豁免确认，但仍受路径沙箱/先读后改限制）", self
+        )
 
         self._form = QFormLayout()
         self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -723,6 +908,7 @@ class _McpServerListEditor(QWidget):
         self._form.addRow("URL", self._url_edit)
         self._form.addRow("HTTP Header（每行 KEY=VALUE）", self._headers_edit)
         self._form.addRow(self._enabled_box)
+        self._form.addRow(self._trusted_box)
 
         add_button = PushButton("新增/更新", self)
         remove_button = PushButton("删除", self)
@@ -769,6 +955,7 @@ class _McpServerListEditor(QWidget):
         self._url_edit.setText(config.url or "")
         self._headers_edit.setPlainText(_env_dict_to_lines(config.headers))
         self._enabled_box.setChecked(config.enabled)
+        self._trusted_box.setChecked(config.trusted)
 
     def _on_add_or_update(self) -> None:
         name = self._name_edit.text().strip()
@@ -786,6 +973,7 @@ class _McpServerListEditor(QWidget):
                 args=_csv_to_list(self._args_edit.text()),
                 env=_env_lines_to_dict(self._env_edit.toPlainText()),
                 enabled=self._enabled_box.isChecked(),
+                trusted=self._trusted_box.isChecked(),
             )
         else:
             url = self._url_edit.text().strip()
@@ -797,6 +985,7 @@ class _McpServerListEditor(QWidget):
                 url=url,
                 headers=_env_lines_to_dict(self._headers_edit.toPlainText()),
                 enabled=self._enabled_box.isChecked(),
+                trusted=self._trusted_box.isChecked(),
             )
         row = self._list.currentRow()
         if 0 <= row < len(self._configs):
