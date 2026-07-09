@@ -254,7 +254,8 @@ class TTSConfig(BaseModel):
       ``model``（如 ``tts-1``）/``voice``（如 ``alloy``）。``api_key`` 经 vault 加密存储，
       磁盘上只留引用，与各对话 Provider 的 key 一致。
 
-    改动后需重启应用生效，与 persona/proactive 等设置一致。
+    设置面板保存后立即热切换生效（``main.py::_resolve_speech_controller_for_settings``），
+    不需要重启应用。
     """
 
     enabled: bool = False

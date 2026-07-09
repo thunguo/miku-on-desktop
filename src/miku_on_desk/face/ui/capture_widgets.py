@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QCoreApplication,
     QIODeviceBase,
     QMicrophonePermission,
+    QObject,
     QPermission,
     Qt,
     QTimer,
@@ -58,6 +59,21 @@ def probe_capture_availability() -> tuple[bool, bool]:
     return bool(QMediaDevices.videoInputs()), bool(QMediaDevices.audioInputs())
 
 
+class _PermissionResultRelay(QObject):
+    """``requestPermission`` 的第三个参数必须是绑定方法（要有 ``__func__``/``__self__``），
+    传普通函数或闭包会在 PySide6 绑定层报 ``AttributeError``，所以用这个 QObject 包一层。
+    """
+
+    def __init__(
+        self, callback: Callable[[Qt.PermissionStatus], None], parent: QObject
+    ) -> None:
+        super().__init__(parent)
+        self._callback = callback
+
+    def on_result(self, permission: QPermission) -> None:
+        self._callback(permission.status())
+
+
 def _default_check_camera_permission() -> Qt.PermissionStatus:
     app = QCoreApplication.instance()
     assert app is not None
@@ -67,11 +83,8 @@ def _default_check_camera_permission() -> Qt.PermissionStatus:
 def _default_request_camera_permission(callback: Callable[[Qt.PermissionStatus], None]) -> None:
     app = QCoreApplication.instance()
     assert app is not None
-
-    def _on_result(permission: QPermission) -> None:
-        callback(permission.status())
-
-    app.requestPermission(QCameraPermission(), app, _on_result)
+    relay = _PermissionResultRelay(callback, app)
+    app.requestPermission(QCameraPermission(), app, relay.on_result)
 
 
 def _default_check_microphone_permission() -> Qt.PermissionStatus:
@@ -85,11 +98,8 @@ def _default_request_microphone_permission(
 ) -> None:
     app = QCoreApplication.instance()
     assert app is not None
-
-    def _on_result(permission: QPermission) -> None:
-        callback(permission.status())
-
-    app.requestPermission(QMicrophonePermission(), app, _on_result)
+    relay = _PermissionResultRelay(callback, app)
+    app.requestPermission(QMicrophonePermission(), app, relay.on_result)
 
 
 class CameraCaptureWidget(QWidget):

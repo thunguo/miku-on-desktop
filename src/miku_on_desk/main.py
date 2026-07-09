@@ -574,6 +574,33 @@ def _apply_pet_voice_if_active(
         logger.exception("为角色 %s 解析/构建语音失败，保留当前语音", pet_dir.name)
 
 
+def _resolve_speech_controller_for_settings(
+    settings: AppSettings,
+    pet_dir: Path,
+    speech_controller: SpeechController | None,
+) -> SpeechController | None:
+    """设置面板保存后，按最新配置重新解析当前激活角色应该用的语音控制器。
+    覆盖三种转变：enabled→disabled（关闭并释放旧 controller，返回 None）、
+    disabled→enabled（新建）、enabled→enabled（热切换 provider）。
+    """
+    tts_config = resolve_tts_config_for_pet(pet_dir, settings)
+    if not tts_config.enabled:
+        if speech_controller is not None:
+            speech_controller.close()
+        return None
+    if speech_controller is None:
+        return _build_speech_controller(settings, pet_dir)
+    try:
+        from miku_on_desk.brain.tts.factory import create_tts_provider
+
+        speech_controller.set_provider(create_tts_provider(tts_config))
+    except Exception:
+        logger.exception(
+            "TTS 配置更新后初始化失败（provider=%s），保留当前语音", tts_config.provider.value
+        )
+    return speech_controller
+
+
 def _on_character_switched(
     pet_dir: Path,
     window: OverlayWindow,
@@ -842,6 +869,9 @@ def main() -> None:
 
     open_windows: list[QWidget] = []
 
+    pet_dir = settings.window.pet_dir or _default_pet_dir()
+    speech_controller = _build_speech_controller(settings, pet_dir)
+
     def _on_quit() -> None:
         cancellation_gate.request_stop()
         chat_input.put(_SHUTDOWN)
@@ -861,19 +891,29 @@ def main() -> None:
     def _queue_message(text: str) -> None:
         message_queue.push(text)
 
+    def _on_settings_saved(new_settings: AppSettings) -> None:
+        nonlocal speech_controller
+        active_pet_dir = new_settings.window.pet_dir or _default_pet_dir()
+        speech_controller = _resolve_speech_controller_for_settings(
+            new_settings, active_pet_dir, speech_controller
+        )
+        window.set_speech_controller(speech_controller)
+
+    def _open_settings() -> SettingsPanel:
+        panel = _open_settings_panel(settings_path, open_windows, vault=vault)
+        panel.settings_saved.connect(_on_settings_saved)
+        return panel
+
     actions = PetActions(
         talk=chat_input.put,
         queue_message=_queue_message,
-        open_settings=lambda: _open_settings_panel(settings_path, open_windows, vault=vault),
+        open_settings=_open_settings,
         open_memory=lambda: _open_memory_panel(memory_system, open_windows),
         open_characters=lambda: _open_character_gallery(
             window, settings_path, open_windows, vault=vault, speech_controller=speech_controller
         ),
         quit=_on_quit,
     )
-
-    pet_dir = settings.window.pet_dir or _default_pet_dir()
-    speech_controller = _build_speech_controller(settings, pet_dir)
 
     window = OverlayWindow(
         pet_dir,
