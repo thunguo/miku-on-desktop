@@ -100,6 +100,7 @@ from miku_on_desk.face.hooks.installer import (
     install_gemini,
 )
 from miku_on_desk.face.hooks.server import PET_EVENT_PATH, HookServer
+from miku_on_desk.face.hooks.session_report import GrowthStore
 from miku_on_desk.face.stt_worker import SttWorker
 from miku_on_desk.face.ui.audio_capture import PcmAudioCapture
 from miku_on_desk.face.ui.character_clone_dialog import CharacterCloneDialog
@@ -969,6 +970,7 @@ def main() -> None:
 
     hook_bus = HookEventBus()
     hook_server = _start_hook_server(settings.hook_server, bootstrap, hook_bus)
+    growth_store = GrowthStore(bootstrap.resolve_data_dir() / "companion_growth.json")
 
     memory_system = default_memory_system(
         settings.memory_dir, bootstrap, tuning=settings.memory_tuning
@@ -1066,6 +1068,7 @@ def main() -> None:
         speech_controller=speech_controller,
         voice_capture=voice_capture,
         stt_worker=stt_worker,
+        growth_store=growth_store,
     )
     window.show()
 

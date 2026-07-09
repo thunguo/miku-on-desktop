@@ -4,7 +4,9 @@
 纯函数合成，``PetSpriteWidget`` 只知道怎么画一帧,真正把两者粘起来的是这里的
 ``_on_animation_tick``。事件来源有两路,都最终落到同一个状态机上：Brain 的 9 种事件
 （``bridge/events.py``）与外部 CLI 工具的 hook 通知（``face/hooks``）,分别由
-``_on_brain_event``/``_on_hook_event`` 消费。
+``_on_brain_event``/``_on_hook_event`` 消费。``_on_hook_event`` 还额外把事件流喂给
+``SessionTracker``，在会话边界（详见 ``face/hooks/session_report.py``）到达时生成一段
+战报小结,与 ``PetStateMachine`` 的状态切换完全独立、互不影响。
 """
 
 from __future__ import annotations
@@ -41,6 +43,15 @@ from miku_on_desk.bridge.events import (
 )
 from miku_on_desk.face.hooks.bridge import HookEventBus
 from miku_on_desk.face.hooks.schema import HookEvent, TransitionKind, resolve_transition
+from miku_on_desk.face.hooks.session_report import (
+    CompanionGrowth,
+    GrowthStore,
+    SessionReport,
+    SessionTracker,
+    format_session_report,
+    growth_flavor_text,
+    update_growth,
+)
 from miku_on_desk.face.pet_motion import PetTargetWalker, PetWalker, compute_stand_position
 from miku_on_desk.face.pet_state import PetState, PetStateMachine
 from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, frame_index
@@ -122,7 +133,8 @@ class OverlayWindow(QWidget):
     ``event_bus``/``confirmation_gate``/``cancellation_gate``/``hook_bus`` 均为可选：不传时
     窗口只是一个纯展示 spike。都传入时，Brain 事件与外部 CLI hook 事件共享同一个
     ``PetStateMachine``，谁先到就先生效，互不冲突（transient 后来者覆盖、baseline 只在真正
-    变化时重置计时）；``cancellation_gate`` 单独驱动任务进行中显示的停止按钮。
+    变化时重置计时）；``cancellation_gate`` 单独驱动任务进行中显示的停止按钮。``growth_store``
+    同样可选：不传时仍会展示单次会话的战报小结，只是不追加/持久化跨会话的心情曲线。
     """
 
     def __init__(
@@ -141,6 +153,7 @@ class OverlayWindow(QWidget):
         speech_controller: SpeechController | None = None,
         voice_capture: PcmAudioCapture | None = None,
         stt_worker: SttWorker | None = None,
+        growth_store: GrowthStore | None = None,
     ) -> None:
         super().__init__()
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
@@ -201,6 +214,9 @@ class OverlayWindow(QWidget):
         self._speech_controller = speech_controller
         self._voice_capture = voice_capture
         self._stt_worker = stt_worker
+        self._session_tracker = SessionTracker()
+        self._growth_store = growth_store
+        self._growth = growth_store.load() if growth_store is not None else CompanionGrowth()
         self._pending_confirmation_request_id: str | None = None
         self._tool_use_names: dict[str, str] = {}
         self._acp_active_agent: str | None = None
@@ -437,17 +453,36 @@ class OverlayWindow(QWidget):
         self._progress_label.move(max(x, 0), y)
 
     def _on_hook_event(self, event: HookEvent) -> None:
+        t = self._elapsed()
+        report = self._session_tracker.observe(event, t=t)
+        if report is not None:
+            self._show_session_report(report)
+
         transition = resolve_transition(event.event)
         if transition is None:
             logger.info("忽略未知 hook 事件：%s", event.event)
             return
-        t = self._elapsed()
         if transition.kind is TransitionKind.BASELINE:
             self._state_machine.set_baseline_state(transition.state, t=t)
             return
         self._state_machine.trigger_transient(transition.state, t=t)
         if event.event in _HOOK_EVENTS_RESETTING_BASELINE:
             self._state_machine.set_baseline_state(PetState.IDLE, t=t)
+
+    def _show_session_report(self, report: SessionReport) -> None:
+        """会话边界（``SessionEnd``，或 Codex 场景下的下一次 ``SessionStart``）触发的
+        战报小结；心情曲线只在配置了持久化的 ``growth_store`` 时才更新/追加一句话，
+        没配置时退化为"只报告这次会话，不追加长期心情"。
+        """
+        text = format_session_report(report)
+        if self._growth_store is not None:
+            self._growth = update_growth(self._growth, report)
+            flavor = growth_flavor_text(self._growth)
+            if flavor is not None:
+                text = f"{text}\n{flavor}"
+            self._growth_store.save(self._growth)
+        self._bubble.show_speech(text)
+        self._reflow_bubble()
 
     def _on_bubble_decision(self, approved: bool) -> None:
         if self._confirmation_gate is None or self._pending_confirmation_request_id is None:

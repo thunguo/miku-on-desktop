@@ -41,6 +41,7 @@ from miku_on_desk.bridge.events import (
 )
 from miku_on_desk.face.hooks.bridge import HookEventBus
 from miku_on_desk.face.hooks.schema import HookEvent
+from miku_on_desk.face.hooks.session_report import GrowthStore
 from miku_on_desk.face.pet_state import PetState
 from miku_on_desk.face.ui import overlay_window as overlay_window_module
 from miku_on_desk.face.ui.chat_popup import ChatPopup
@@ -736,6 +737,75 @@ def test_hook_event_unknown_event_is_ignored(qapp: QApplication, tmp_path: Path)
     hook_bus.emit_event(HookEvent(event="SomeFutureEvent"))
 
     assert window._state_machine.current_state(window._elapsed()) == PetState.IDLE
+
+
+def test_hook_event_session_end_shows_session_report_in_bubble(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    hook_bus = HookEventBus()
+    window = _make_window(tmp_path, hook_bus=hook_bus)
+
+    hook_bus.emit_event(HookEvent(event="SessionStart", source="claude_code"))
+    hook_bus.emit_event(HookEvent(event="PostToolUse"))
+    hook_bus.emit_event(HookEvent(event="SessionEnd"))
+
+    assert "次工具" in window._bubble.current_text()
+
+
+def test_hook_event_turn_level_stop_does_not_trigger_session_report(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    hook_bus = HookEventBus()
+    window = _make_window(tmp_path, hook_bus=hook_bus)
+
+    hook_bus.emit_event(HookEvent(event="SessionStart", source="claude_code"))
+    hook_bus.emit_event(HookEvent(event="UserPromptSubmit"))
+    hook_bus.emit_event(HookEvent(event="Stop"))
+
+    assert window._bubble.current_text() == ""
+
+
+def test_hook_event_codex_style_session_start_finalizes_previous_session(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Codex CLI 没有安装 SessionEnd,靠下一次 SessionStart 补记上一个会话的战报。"""
+    hook_bus = HookEventBus()
+    window = _make_window(tmp_path, hook_bus=hook_bus)
+
+    hook_bus.emit_event(HookEvent(event="SessionStart", source="codex"))
+    hook_bus.emit_event(HookEvent(event="PostToolUse"))
+    assert window._bubble.current_text() == ""
+
+    hook_bus.emit_event(HookEvent(event="SessionStart", source="codex"))
+
+    assert "次工具" in window._bubble.current_text()
+
+
+def test_hook_event_session_report_without_growth_store_has_no_growth_flavor(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    hook_bus = HookEventBus()
+    window = _make_window(tmp_path, hook_bus=hook_bus)
+
+    hook_bus.emit_event(HookEvent(event="SessionStart"))
+    hook_bus.emit_event(HookEvent(event="SessionEnd"))
+
+    assert "第 1 次" not in window._bubble.current_text()
+
+
+def test_hook_event_session_report_with_growth_store_adds_milestone_flavor_and_persists(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    hook_bus = HookEventBus()
+    growth_path = tmp_path / "companion_growth.json"
+    store = GrowthStore(growth_path)
+    window = _make_window(tmp_path, hook_bus=hook_bus, growth_store=store)
+
+    hook_bus.emit_event(HookEvent(event="SessionStart"))
+    hook_bus.emit_event(HookEvent(event="SessionEnd"))
+
+    assert "第 1 次" in window._bubble.current_text()
+    assert store.load().sessions_completed == 1
 
 
 def test_click_without_drag_triggers_clicked_transient(qapp: QApplication, tmp_path: Path) -> None:
