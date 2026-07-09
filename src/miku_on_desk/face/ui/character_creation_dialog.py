@@ -191,15 +191,13 @@ class _GenerationProgressView(QWidget):
         layout.addWidget(self._cancel_button)
 
         self._reference_tile.start_breathing()
-        if STATE_SPECS:
-            self._state_tiles[STATE_SPECS[0].state].start_breathing()
 
     def on_progress(self, progress: GenerationProgress) -> None:
         if progress.stage == "reference":
             if progress.reference_image is not None:
                 if not self._reference_done:
                     self._reference_tile.show_result(progress.reference_image)
-                    self._reference_done = True
+                    self._on_reference_done()
                 return
             self._status_label.setText("生成基准参考图…")
             return
@@ -211,20 +209,24 @@ class _GenerationProgressView(QWidget):
             self._progress_bar.setValue(progress.completed_states)
             if not self._reference_done:
                 self._reference_tile.mark_done_placeholder()
-                self._reference_done = True
-            completed_index = progress.completed_states - 1
-            completed_state = STATE_SPECS[completed_index].state
+                self._on_reference_done()
+            # 各状态并发生成，完成顺序和 STATE_SPECS 顺序无关，只能靠 detail（该状态自己的
+            # 名字）认领对应的 tile，不能像以前那样假设 completed_states 就是下标。
+            completed_state = PetState(progress.detail)
             if progress.strip_image is not None:
                 frame = progress.strip_image.crop((0, 0, self._frame_width, self._frame_height))
                 self._state_tiles[completed_state].show_result(frame)
-            next_index = progress.completed_states
-            if next_index < len(STATE_SPECS):
-                self._state_tiles[STATE_SPECS[next_index].state].start_breathing()
             return
         if progress.stage == "assemble":
             self._status_label.setText("拼装 spritesheet…")
             return
         self._status_label.setText("运行 QA 检查…")
+
+    def _on_reference_done(self) -> None:
+        """参考图就位后所有状态动作条几乎同时开始并发请求，对应 tile 一起进入呼吸态。"""
+        self._reference_done = True
+        for tile in self._state_tiles.values():
+            tile.start_breathing()
 
     def freeze(self) -> None:
         self._reference_tile.stop_breathing()

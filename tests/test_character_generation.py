@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -16,7 +17,10 @@ from openai.types.image import Image as OpenAIImage
 from openai.types.images_response import ImagesResponse
 from PIL import Image
 
+from miku_on_desk import character_generation
 from miku_on_desk.character_generation import (
+    STATE_SPECS,
+    GenerationCancelled,
     GenerationConfig,
     GenerationError,
     StatePromptSpec,
@@ -25,6 +29,7 @@ from miku_on_desk.character_generation import (
     _crop_to_bbox,
     _decode_first_image,
     _effective_background,
+    _generate_all_strips,
     _quantize_preserving_alpha,
     _reference_image_prompt_for_upload,
     assemble_spritesheet,
@@ -334,3 +339,128 @@ def test_reference_image_prompt_for_upload_illustration_kind_differs_from_selfie
 
     assert illustration_prompt != selfie_prompt
     assert "INVENT a complete, plausible full body" not in illustration_prompt
+
+
+def _minimal_config(tmp_path: Path) -> GenerationConfig:
+    return GenerationConfig(
+        pet_name="test_pet",
+        description="a test character",
+        output_dir=tmp_path / "test_pet",
+        api_key="sk-test",
+    )
+
+
+def _tagged_image(tag: int) -> Image.Image:
+    """给假的动作条打上可分辨的标记（编码进像素值），用来断言回填顺序没被打乱。"""
+    return Image.new("RGBA", (1, 1), (tag, 0, 0, 255))
+
+
+def test_generate_all_strips_preserves_spec_order_despite_out_of_order_completion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """并发下第一个提交的请求故意让它最慢完成，其余都很快——制造真实的乱序完成，
+    断言最终结果仍按 STATE_SPECS 下标对齐，且 detail 事件的到达顺序确实不是提交顺序。
+    """
+    completion_order: list[str] = []
+
+    def fake_generate_strip_for_spec(
+        client: object,
+        config: GenerationConfig,
+        reference: Image.Image,
+        raw_dir: Path,
+        spec: StatePromptSpec,
+    ) -> Image.Image:
+        del client, config, reference, raw_dir
+        index = STATE_SPECS.index(spec)
+        if index == 0:
+            time.sleep(0.15)
+        completion_order.append(spec.state.value)
+        return _tagged_image(index)
+
+    monkeypatch.setattr(
+        character_generation, "_generate_strip_for_spec", fake_generate_strip_for_spec
+    )
+
+    progress_events: list[character_generation.GenerationProgress] = []
+    strips = _generate_all_strips(
+        client=object(),
+        config=_minimal_config(tmp_path),
+        reference=Image.new("RGBA", (1, 1)),
+        raw_dir=tmp_path,
+        on_progress=progress_events.append,
+        should_cancel=lambda: False,
+    )
+
+    assert len(strips) == len(STATE_SPECS)
+    for index, strip in enumerate(strips):
+        assert strip.getpixel((0, 0))[0] == index
+
+    strip_events = [p for p in progress_events if p.stage == "strip"]
+    assert {p.detail for p in strip_events} == {spec.state.value for spec in STATE_SPECS}
+    assert completion_order != [spec.state.value for spec in STATE_SPECS]
+    assert completion_order[-1] == STATE_SPECS[0].state.value
+
+
+def test_generate_all_strips_raises_cancelled_without_submitting_when_already_cancelled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def fake_generate_strip_for_spec(
+        client: object,
+        config: GenerationConfig,
+        reference: Image.Image,
+        raw_dir: Path,
+        spec: StatePromptSpec,
+    ) -> Image.Image:
+        del client, config, reference, raw_dir
+        calls.append(spec.state.value)
+        return _tagged_image(0)
+
+    monkeypatch.setattr(
+        character_generation, "_generate_strip_for_spec", fake_generate_strip_for_spec
+    )
+
+    with pytest.raises(GenerationCancelled):
+        _generate_all_strips(
+            client=object(),
+            config=_minimal_config(tmp_path),
+            reference=Image.new("RGBA", (1, 1)),
+            raw_dir=tmp_path,
+            on_progress=lambda _progress: None,
+            should_cancel=lambda: True,
+        )
+
+    assert calls == []
+
+
+def test_generate_all_strips_propagates_exception_from_a_failed_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    failing_state = STATE_SPECS[2].state
+
+    def fake_generate_strip_for_spec(
+        client: object,
+        config: GenerationConfig,
+        reference: Image.Image,
+        raw_dir: Path,
+        spec: StatePromptSpec,
+    ) -> Image.Image:
+        del client, config, reference, raw_dir
+        if spec.state == failing_state:
+            raise GenerationError("模拟网络失败")
+        return _tagged_image(0)
+
+    monkeypatch.setattr(
+        character_generation, "_generate_strip_for_spec", fake_generate_strip_for_spec
+    )
+
+    with pytest.raises(GenerationError, match="模拟网络失败"):
+        _generate_all_strips(
+            client=object(),
+            config=_minimal_config(tmp_path),
+            reference=Image.new("RGBA", (1, 1)),
+            raw_dir=tmp_path,
+            on_progress=lambda _progress: None,
+            should_cancel=lambda: False,
+        )

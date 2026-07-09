@@ -214,6 +214,35 @@ def test_generation_progress_view_on_progress_strip_stage_updates_progress_and_t
     )
 
 
+def test_generation_progress_view_on_progress_strip_stage_uses_detail_not_index(
+    qapp: QApplication,
+) -> None:
+    """并发生成下完成顺序和 STATE_SPECS 顺序无关：这里模拟"最后一个状态反而最先完成"
+    （completed_states=1，但 detail 是 STATE_SPECS 里最后一个状态），结果应该点亮
+    STATE_SPECS[-1] 对应的 tile，而不是按下标误认成 STATE_SPECS[0]。
+    """
+    view = _GenerationProgressView(4, 4)
+    strip_image = Image.new("RGBA", (8, 8), (10, 20, 30, 255))
+    last_state = STATE_SPECS[-1].state
+    first_state = STATE_SPECS[0].state
+    progress = GenerationProgress(
+        stage="strip",
+        detail=last_state.value,
+        completed_states=1,
+        total_states=len(STATE_SPECS),
+        strip_image=strip_image,
+    )
+
+    view.on_progress(progress)
+
+    assert view._state_tiles[last_state]._image_label.styleSheet() == (
+        view._state_tiles[last_state]._done_style
+    )
+    assert view._state_tiles[first_state]._image_label.styleSheet() == (
+        view._state_tiles[first_state]._idle_style
+    )
+
+
 def test_generation_progress_view_on_progress_assemble_stage_sets_status(
     qapp: QApplication,
 ) -> None:
