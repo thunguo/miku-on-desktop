@@ -79,3 +79,31 @@ uv run ruff check .        # lint
 uv run mypy src            # 类型检查(strict 模式,见 pyproject.toml)
 uv run pytest -q           # 测试
 ```
+
+### macOS 摄像头/麦克风权限(克隆角色功能调试)
+
+"克隆角色"流程需要拍照(摄像头)和录音(麦克风)。开发时通过 `uv run miku-on-desk` /
+IDE 直接运行,实际跑起来的是 uv 管理的裸 `python3` 解释器,它自己没有 `Info.plist`,
+不能声明 `NSCameraUsageDescription`/`NSMicrophoneUsageDescription`。macOS 会把权限请求
+归因给"责任进程"——沿父进程链向上找到的第一个已签名、声明了对应用途说明的 App,
+一般是你用来启动它的终端或 IDE(PyCharm / Terminal / iTerm2 / VS Code 等),**不是**
+`miku-on-desk` 自己。
+
+首次进入拍照/录音步骤时:
+
+1. 系统会弹出权限对话框,写的是你的终端/IDE 的名字(例如"PyCharm 想访问相机"),
+   点"允许"即可,之后同一个终端/IDE 启动的进程都会沿用这个授权。
+2. 如果没有弹窗、直接提示"权限被拒绝":说明之前已经有一次被记成了拒绝(常见于权限
+   请求过程中程序崩溃导致的异常状态)。用 `tccutil` 清掉缓存的决定后重试:
+
+   ```bash
+   tccutil reset Camera <bundle-id>
+   tccutil reset Microphone <bundle-id>
+   ```
+
+   常见 `<bundle-id>`:PyCharm 是 `com.jetbrains.pycharm`,Terminal.app 是
+   `com.apple.Terminal`,iTerm2 是 `com.googlecode.iterm2`,VS Code 是
+   `com.microsoft.VSCode`。执行后**完全退出并重新打开**该终端/IDE(不能只是重跑脚本),
+   再重新走一次拍照/录音流程。
+3. 也可以在"系统设置 → 隐私与安全性 → 摄像头/麦克风"里直接查看、手动开关对应
+   终端/IDE 的授权状态。

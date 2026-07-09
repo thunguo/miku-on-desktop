@@ -181,7 +181,9 @@ class CameraCaptureWidget(QWidget):
     def _on_image_captured(self, _id: int, image: QImage) -> None:
         buffer = QBuffer()
         buffer.open(QIODeviceBase.OpenModeFlag.WriteOnly)
-        image.save(buffer, b"PNG")
+        # PySide6 6.11 的类型标注写的是 bytes，但运行时实际只接受 str，传 bytes 会在绑定层报
+        # ValueError（已用 uv run python 直接验证过），这里的 type: ignore 是绕过标注和实现不一致。
+        image.save(buffer, "PNG")  # type: ignore[call-overload]
         self.photo_captured.emit(bytes(buffer.data().data()))
         buffer.close()
 
