@@ -319,6 +319,27 @@ class VoiceCloningConfig(BaseModel):
     elevenlabs_base_url: str | None = None
 
 
+class VoiceInputProviderName(StrEnum):
+    """语音输入（STT）引擎选择。新增引擎只需在此加一项，并在 ``brain.stt.factory`` 注册。"""
+
+    ELEVENLABS = "elevenlabs"
+
+
+class VoiceInputConfig(BaseModel):
+    """语音输入（STT）：实时流式转写用户说话，结果填入聊天输入框待用户确认/编辑，不自动
+    发送。默认关闭。``api_key`` 独立于 ``voice_cloning.elevenlabs_api_key``——同一厂商但不同
+    功能各自一份凭证，与本文件其余"一个功能一份凭证"的既有约定一致。
+    """
+
+    enabled: bool = False
+    provider: VoiceInputProviderName = VoiceInputProviderName.ELEVENLABS
+    api_key: str | None = None
+    base_url: str | None = None
+    model_id: str = "scribe_v2_realtime"
+    language_code: str | None = "zh"
+    max_recording_s: int = 60
+
+
 class AppSettings(BaseModel):
     """完整可配置项树，由设置面板读写，落盘为 JSON。"""
 
@@ -342,6 +363,7 @@ class AppSettings(BaseModel):
     computer_use: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     voice_cloning: VoiceCloningConfig = Field(default_factory=VoiceCloningConfig)
+    voice_input: VoiceInputConfig = Field(default_factory=VoiceInputConfig)
 
     @classmethod
     def load(cls, path: Path) -> AppSettings:
@@ -363,6 +385,7 @@ _VAULT_REF_PREFIX = "vault-ref:"
 _IMAGE_GENERATION_VAULT_KEY = "image_generation_api_key"
 _TTS_VAULT_KEY = "tts_api_key"
 _VOICE_CLONING_VAULT_KEY = "voice_cloning_api_key"
+_VOICE_INPUT_VAULT_KEY = "voice_input_api_key"
 
 
 def _provider_vault_key(name: ProviderName) -> str:
@@ -421,6 +444,11 @@ def load_settings_with_vault(path: Path, vault: SecretVault) -> AppSettings:
     )
     migrated = migrated or voice_cloning_migrated
 
+    settings.voice_input.api_key, voice_input_migrated = _migrate_or_resolve(
+        settings.voice_input.api_key, _VOICE_INPUT_VAULT_KEY, vault
+    )
+    migrated = migrated or voice_input_migrated
+
     if migrated:
         save_settings_with_vault(settings, path, vault)
 
@@ -456,5 +484,10 @@ def save_settings_with_vault(settings: AppSettings, path: Path, vault: SecretVau
     if voice_cloning_key is not None and not voice_cloning_key.startswith(_VAULT_REF_PREFIX):
         vault.store(_VOICE_CLONING_VAULT_KEY, voice_cloning_key)
         disk_copy.voice_cloning.elevenlabs_api_key = _vault_ref(_VOICE_CLONING_VAULT_KEY)
+
+    voice_input_key = disk_copy.voice_input.api_key
+    if voice_input_key is not None and not voice_input_key.startswith(_VAULT_REF_PREFIX):
+        vault.store(_VOICE_INPUT_VAULT_KEY, voice_input_key)
+        disk_copy.voice_input.api_key = _vault_ref(_VOICE_INPUT_VAULT_KEY)
 
     disk_copy.save(path)

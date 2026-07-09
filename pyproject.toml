@@ -37,9 +37,12 @@ dependencies = [
     "psutil>=7.2.2",
     "pyperclip>=1.11.0",
     # TTS（文字转语音）：edge-tts 调微软 Edge 在线语音，免 Key、离线不可用；
-    # elevenlabs 官方 SDK 用于 ElevenLabs 引擎（OpenAI 兼容引擎复用 openai SDK）
+    # elevenlabs 官方 SDK 用于 ElevenLabs 引擎（OpenAI 兼容引擎复用 openai SDK），
+    # 同时用于语音输入（STT）的实时流式转写
     "edge-tts>=7.0.0",
     "elevenlabs>=2.0",
+    # elevenlabs 的 realtime STT 直接依赖 websockets，非仅传递依赖，显式声明
+    "websockets>=16.0",
 ]
 
 [project.optional-dependencies]

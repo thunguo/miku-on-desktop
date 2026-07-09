@@ -92,6 +92,8 @@ from miku_on_desk.face.character_voice import resolve_tts_config_for_pet
 from miku_on_desk.face.hooks.bridge import HookEventBus
 from miku_on_desk.face.hooks.installer import default_claude_settings_path, install
 from miku_on_desk.face.hooks.server import PET_EVENT_PATH, HookServer
+from miku_on_desk.face.stt_worker import SttWorker
+from miku_on_desk.face.ui.audio_capture import PcmAudioCapture
 from miku_on_desk.face.ui.character_clone_dialog import CharacterCloneDialog
 from miku_on_desk.face.ui.character_creation_dialog import CharacterCreationDialog
 from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel
@@ -144,6 +146,27 @@ def _build_speech_controller(settings: AppSettings, pet_dir: Path) -> SpeechCont
         return SpeechController(create_tts_provider(tts))
     except Exception:
         logger.exception("TTS 初始化失败（provider=%s），已禁用语音", tts.provider.value)
+        return None
+
+
+def _build_voice_input(settings: AppSettings) -> tuple[PcmAudioCapture, SttWorker] | None:
+    """语音输入是全局配置（不像语音输出那样按角色绑定），关闭或未配置 API Key 时返回
+    None，初始化失败时降级为不启用语音输入（不拖垮启动）。
+    """
+    voice_input = settings.voice_input
+    if not voice_input.enabled or not voice_input.api_key:
+        return None
+    try:
+        from miku_on_desk.brain.stt.factory import create_stt_provider
+
+        capture = PcmAudioCapture(max_duration_s=voice_input.max_recording_s)
+        worker = SttWorker(create_stt_provider(voice_input))
+        worker.start()
+        return capture, worker
+    except Exception:
+        logger.exception(
+            "语音输入初始化失败（provider=%s），已禁用语音输入", voice_input.provider.value
+        )
         return None
 
 
@@ -639,6 +662,21 @@ def _resolve_speech_controller_for_settings(
     return speech_controller
 
 
+def _resolve_voice_input_for_settings(
+    settings: AppSettings,
+    voice_input: tuple[PcmAudioCapture, SttWorker] | None,
+) -> tuple[PcmAudioCapture, SttWorker] | None:
+    """设置面板保存后，按最新语音输入配置重新解析。跟 `_resolve_speech_controller_for_settings`
+    不同的是这里不做热切换——`SttWorker` 内部持有的 provider 没有 `set_provider` 那样的热替换
+    入口（API Key/语言/模型任何一项变了都要整个换新连接），直接停旧建新更简单可靠。
+    """
+    if voice_input is not None:
+        _, worker = voice_input
+        worker.stop()
+        worker.wait(3000)
+    return _build_voice_input(settings)
+
+
 def _on_character_switched(
     pet_dir: Path,
     window: OverlayWindow,
@@ -815,7 +853,13 @@ def _startup_health_warnings(settings: AppSettings, bootstrap: EnvBootstrap) -> 
     return warnings
 
 
-def _build_tray_icon(app: QApplication, actions: PetActions) -> tuple[QSystemTrayIcon, QMenu]:
+def _build_tray_icon(
+    app: QApplication,
+    actions: PetActions,
+    *,
+    voice_capture: PcmAudioCapture | None = None,
+    stt_worker: SttWorker | None = None,
+) -> tuple[QSystemTrayIcon, QMenu]:
     icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
     tray = QSystemTrayIcon(icon, app)
     # ``setContextMenu`` 不持有 menu 的所有权（Qt 文档明确写明），若 menu 在这里创建后
@@ -826,7 +870,7 @@ def _build_tray_icon(app: QApplication, actions: PetActions) -> tuple[QSystemTra
 
     # 同理，chat_popup 只被这里的闭包引用，没有 Qt 父子关系兜底，必须自己存活到 app.exec()
     # 结束——挂在 _on_talk 闭包里即可，不需要额外变量。
-    chat_popup = ChatPopup()
+    chat_popup = ChatPopup(voice_capture=voice_capture, stt_worker=stt_worker)
     chat_popup.text_submitted.connect(actions.talk)
 
     talk_action = QAction("对 Miku 说…", menu)
@@ -909,6 +953,7 @@ def main() -> None:
 
     pet_dir = settings.window.pet_dir or _default_pet_dir()
     speech_controller = _build_speech_controller(settings, pet_dir)
+    voice_input = _build_voice_input(settings)
 
     def _on_quit() -> None:
         cancellation_gate.request_stop()
@@ -920,6 +965,10 @@ def main() -> None:
             hook_server.stop()
         if speech_controller is not None:
             speech_controller.close()
+        if voice_input is not None:
+            _, worker = voice_input
+            worker.stop()
+            worker.wait(3000)
         vault.close()
         app.quit()
 
@@ -930,12 +979,15 @@ def main() -> None:
         message_queue.push(text)
 
     def _on_settings_saved(new_settings: AppSettings) -> None:
-        nonlocal speech_controller
+        nonlocal speech_controller, voice_input
         active_pet_dir = new_settings.window.pet_dir or _default_pet_dir()
         speech_controller = _resolve_speech_controller_for_settings(
             new_settings, active_pet_dir, speech_controller
         )
         window.set_speech_controller(speech_controller)
+        voice_input = _resolve_voice_input_for_settings(new_settings, voice_input)
+        new_capture, new_worker = voice_input if voice_input is not None else (None, None)
+        window.set_voice_input(new_capture, new_worker)
 
     def _open_settings() -> SettingsPanel:
         panel = _open_settings_panel(settings_path, open_windows, vault=vault)
@@ -953,6 +1005,8 @@ def main() -> None:
         quit=_on_quit,
     )
 
+    voice_capture, stt_worker = voice_input if voice_input is not None else (None, None)
+
     window = OverlayWindow(
         pet_dir,
         x=settings.window.x,
@@ -968,10 +1022,14 @@ def main() -> None:
         confirm_yes_shortcut=settings.shortcuts.confirm_yes,
         confirm_no_shortcut=settings.shortcuts.confirm_no,
         speech_controller=speech_controller,
+        voice_capture=voice_capture,
+        stt_worker=stt_worker,
     )
     window.show()
 
-    tray, _tray_menu = _build_tray_icon(app, actions)
+    tray, _tray_menu = _build_tray_icon(
+        app, actions, voice_capture=voice_capture, stt_worker=stt_worker
+    )
     tray.show()
 
     health_warnings = _startup_health_warnings(settings, bootstrap)

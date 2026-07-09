@@ -1,23 +1,28 @@
 """ElevenLabs TTS 实现：走官方 ``elevenlabs`` SDK 的 ``text_to_speech.convert`` 合成音频。
 
 字段映射：``config.voice`` → voice_id，``config.model`` → model_id，``config.api_key`` →
-鉴权，``config.base_url`` 可覆盖默认站点（自建/代理时用）。强制请求 mp3，与其它引擎对齐，
-保证下游 ``QMediaPlayer`` 直接可播。SDK 的异步 ``convert`` 返回音频字节的 ``AsyncIterator``，
-这里拼接成完整字节返回。
+鉴权，``config.base_url`` 可覆盖默认站点（自建/代理时用）。请求裸 PCM（16-bit 有符号
+小端、单声道、24kHz——``pcm_24000`` 不受订阅档位限制），播放侧据此可直接推流到
+``QAudioSink`` 而无需解码，实现句内真流式播放。SDK 的异步 ``convert`` 本身就是按 HTTP
+chunk 逐块产出的 ``AsyncIterator``，这里原样转发，不做任何攒批缓冲。
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from elevenlabs.client import AsyncElevenLabs
 
+from miku_on_desk.brain.tts.base import PcmFormat
 from miku_on_desk.config.settings import TTSConfig
 
 _DEFAULT_MODEL = "eleven_multilingual_v2"
-_OUTPUT_FORMAT = "mp3_44100_128"
+_OUTPUT_FORMAT = "pcm_24000"
+_SAMPLE_RATE = 24000
 
 
 class ElevenLabsTTSProvider:
-    """把文本合成为 mp3 字节的 :class:`~miku_on_desk.brain.tts.base.TTSProvider` 实现。"""
+    """把文本合成为 PCM 字节流的 :class:`~miku_on_desk.brain.tts.base.TTSProvider` 实现。"""
 
     def __init__(self, config: TTSConfig) -> None:
         if not config.api_key:
@@ -32,15 +37,15 @@ class ElevenLabsTTSProvider:
         self._client = AsyncElevenLabs(
             api_key=config.api_key, base_url=config.base_url or None
         )
+        self.pcm_format: PcmFormat | None = PcmFormat(sample_rate=_SAMPLE_RATE)
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
         stream = self._client.text_to_speech.convert(
             self._voice_id,
             text=text,
             model_id=self._model,
             output_format=_OUTPUT_FORMAT,
         )
-        buffer = bytearray()
         async for chunk in stream:
-            buffer.extend(chunk)
-        return bytes(buffer)
+            if chunk:
+                yield chunk

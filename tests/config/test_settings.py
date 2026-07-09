@@ -25,6 +25,7 @@ from miku_on_desk.config.settings import (
     TTSConfig,
     TTSProviderName,
     VoiceCloningConfig,
+    VoiceInputConfig,
     load_settings_with_vault,
     save_settings_with_vault,
 )
@@ -365,6 +366,83 @@ def test_load_settings_with_vault_migrates_legacy_plaintext_voice_cloning_api_ke
         assert "sk-elevenlabs-legacy" not in on_disk_text
         on_disk = json.loads(on_disk_text)
         assert on_disk["voice_cloning"]["elevenlabs_api_key"].startswith("vault-ref:")
+    finally:
+        vault.close()
+
+
+def test_voice_input_config_defaults_to_disabled_with_zh_language() -> None:
+    config = VoiceInputConfig()
+
+    assert config.enabled is False
+    assert config.api_key is None
+    assert config.language_code == "zh"
+
+
+def test_app_settings_voice_input_roundtrip_through_save_and_load(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.voice_input = VoiceInputConfig(
+        enabled=True,
+        api_key="sk-voice-input-plain",
+        base_url="https://api.elevenlabs.io",
+        language_code="en",
+    )
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded.voice_input == settings.voice_input
+
+
+def test_app_settings_load_missing_voice_input_field_still_loads_with_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"window": {"x": 1}}), encoding="utf-8")
+
+    loaded = AppSettings.load(path)
+
+    assert loaded.voice_input == VoiceInputConfig()
+
+
+def test_save_settings_with_vault_stores_voice_input_api_key_in_vault_not_on_disk(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.voice_input = VoiceInputConfig(enabled=True, api_key="sk-voice-input-plain")
+
+    vault = _make_vault(tmp_path)
+    try:
+        save_settings_with_vault(settings, settings_path, vault)
+        reloaded = load_settings_with_vault(settings_path, vault)
+
+        assert reloaded.voice_input.api_key == "sk-voice-input-plain"
+        on_disk_text = settings_path.read_text(encoding="utf-8")
+        assert "sk-voice-input-plain" not in on_disk_text
+        on_disk = json.loads(on_disk_text)
+        assert on_disk["voice_input"]["api_key"].startswith("vault-ref:")
+    finally:
+        vault.close()
+
+
+def test_load_settings_with_vault_migrates_legacy_plaintext_voice_input_api_key(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    legacy = AppSettings()
+    legacy.voice_input = VoiceInputConfig(enabled=True, api_key="sk-voice-input-legacy")
+    legacy.save(settings_path)
+
+    vault = _make_vault(tmp_path)
+    try:
+        loaded = load_settings_with_vault(settings_path, vault)
+
+        assert loaded.voice_input.api_key == "sk-voice-input-legacy"
+        on_disk_text = settings_path.read_text(encoding="utf-8")
+        assert "sk-voice-input-legacy" not in on_disk_text
+        on_disk = json.loads(on_disk_text)
+        assert on_disk["voice_input"]["api_key"].startswith("vault-ref:")
     finally:
         vault.close()
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -541,8 +542,11 @@ def test_startup_health_warnings_empty_when_everything_healthy(tmp_path: Path) -
 
 
 class _FakeTTSProvider:
-    async def synthesize(self, text: str) -> bytes:
-        return b""
+    pcm_format = None
+
+    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
+        return
+        yield b""
 
 
 def test_resolve_speech_controller_for_settings_closes_and_returns_none_when_disabled(
