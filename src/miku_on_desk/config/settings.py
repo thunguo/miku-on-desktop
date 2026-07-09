@@ -235,6 +235,40 @@ class ProactiveConfig(BaseModel):
     max_daily_triggers: int = 10
 
 
+class TTSProviderName(StrEnum):
+    """TTS 引擎选择。新增引擎只需在此加一项，并在 ``brain.tts.factory`` 注册对应实现。"""
+
+    EDGE = "edge"
+    OPENAI = "openai"
+    ELEVENLABS = "elevenlabs"
+
+
+class TTSConfig(BaseModel):
+    """文字转语音（TTS）：让 Miku 说话时同步用语音朗读 ``ContentDelta`` 文本。默认关闭。
+
+    ``provider`` 决定用哪个引擎合成，不同引擎只读取与自己相关的字段（见下），互不干扰：
+
+    - ``edge``——微软 Edge 在线语音，免 Key。用 ``voice``（音库名，如 ``zh-CN-XiaoxiaoNeural``）、
+      ``rate``/``volume``（edge-tts 相对量格式 ``"+0%"``/``"-10%"``）。
+    - ``openai``——任何 OpenAI 兼容的 ``/v1/audio/speech`` 接口。用 ``api_key``/``base_url``/
+      ``model``（如 ``tts-1``）/``voice``（如 ``alloy``）。``api_key`` 经 vault 加密存储，
+      磁盘上只留引用，与各对话 Provider 的 key 一致。
+
+    改动后需重启应用生效，与 persona/proactive 等设置一致。
+    """
+
+    enabled: bool = False
+    provider: TTSProviderName = TTSProviderName.EDGE
+    voice: str = "zh-CN-XiaoxiaoNeural"
+    # edge 专用：相对语速/音量
+    rate: str = "+0%"
+    volume: str = "+0%"
+    # OpenAI 兼容 TTS 专用：接入点凭证与模型
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str = "tts-1"
+
+
 class ComputerUseConfig(BaseModel):
     """`computer_input` 工具的自动结算与焦点漂移检测闭环。默认关闭：涉及工具执行后自动
     介入这一产品行为变化，需要用户主动打开。"""
@@ -285,6 +319,7 @@ class AppSettings(BaseModel):
     loop_behavior: LoopBehaviorConfig = Field(default_factory=LoopBehaviorConfig)
     memory_tuning: MemoryTuningConfig = Field(default_factory=MemoryTuningConfig)
     computer_use: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
+    tts: TTSConfig = Field(default_factory=TTSConfig)
 
     @classmethod
     def load(cls, path: Path) -> AppSettings:
@@ -304,6 +339,7 @@ def default_settings_path(bootstrap: EnvBootstrap | None = None) -> Path:
 
 _VAULT_REF_PREFIX = "vault-ref:"
 _IMAGE_GENERATION_VAULT_KEY = "image_generation_api_key"
+_TTS_VAULT_KEY = "tts_api_key"
 
 
 def _provider_vault_key(name: ProviderName) -> str:
@@ -352,6 +388,11 @@ def load_settings_with_vault(path: Path, vault: SecretVault) -> AppSettings:
     )
     migrated = migrated or image_migrated
 
+    settings.tts.api_key, tts_migrated = _migrate_or_resolve(
+        settings.tts.api_key, _TTS_VAULT_KEY, vault
+    )
+    migrated = migrated or tts_migrated
+
     if migrated:
         save_settings_with_vault(settings, path, vault)
 
@@ -377,5 +418,10 @@ def save_settings_with_vault(settings: AppSettings, path: Path, vault: SecretVau
     if image_key is not None and not image_key.startswith(_VAULT_REF_PREFIX):
         vault.store(_IMAGE_GENERATION_VAULT_KEY, image_key)
         disk_copy.image_generation.api_key = _vault_ref(_IMAGE_GENERATION_VAULT_KEY)
+
+    tts_key = disk_copy.tts.api_key
+    if tts_key is not None and not tts_key.startswith(_VAULT_REF_PREFIX):
+        vault.store(_TTS_VAULT_KEY, tts_key)
+        disk_copy.tts.api_key = _vault_ref(_TTS_VAULT_KEY)
 
     disk_copy.save(path)

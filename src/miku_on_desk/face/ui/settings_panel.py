@@ -52,6 +52,8 @@ from miku_on_desk.config.settings import (
     PersonaConfig,
     ProviderConfig,
     ProviderName,
+    TTSConfig,
+    TTSProviderName,
     save_settings_with_vault,
 )
 from miku_on_desk.face.ui.theme import RADIUS_MD, WARNING_COLOR
@@ -69,6 +71,12 @@ _PROVIDER_LABELS = {
 
 _QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _QWEN_FAST_MODEL = "qwen3-vl-plus"
+
+_TTS_PROVIDER_LABELS: dict[TTSProviderName, str] = {
+    TTSProviderName.EDGE: "Edge（微软在线，免 Key）",
+    TTSProviderName.OPENAI: "OpenAI 兼容（/v1/audio/speech）",
+    TTSProviderName.ELEVENLABS: "ElevenLabs",
+}
 
 _MCP_TRANSPORT_LABELS: dict[McpTransport, str] = {
     McpTransport.STDIO: "本机命令（stdio）",
@@ -198,6 +206,14 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._time_critical_remaining_edit = LineEdit(self)
         self._computer_use_enabled_box = CheckBox("启用 Computer Use 闭环", self)
         self._computer_use_settle_delay_edit = LineEdit(self)
+        self._tts_enabled_box = CheckBox("启用语音朗读（TTS）", self)
+        self._tts_provider_combo = ComboBox(self)
+        self._tts_voice_edit = LineEdit(self)
+        self._tts_rate_edit = LineEdit(self)
+        self._tts_volume_edit = LineEdit(self)
+        self._tts_api_key_edit = LineEdit(self)
+        self._tts_base_url_edit = LineEdit(self)
+        self._tts_model_edit = LineEdit(self)
 
         self._mcp_editor = _McpServerListEditor(self._settings.mcp_servers, self)
         self._agent_editor = _AgentProfileListEditor(self._settings.agent_profiles, self)
@@ -211,6 +227,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         window_tab = self._build_window_tab()
         shortcuts_tab = self._build_shortcuts_tab()
         proactive_tab = self._build_proactive_tab()
+        tts_tab = self._build_tts_tab()
         advanced_tab = self._build_advanced_tab()
         for widget, object_name in (
             (providers_tab, "providerTab"),
@@ -224,6 +241,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
             (window_tab, "windowTab"),
             (shortcuts_tab, "shortcutsTab"),
             (proactive_tab, "proactiveTab"),
+            (tts_tab, "ttsTab"),
             (advanced_tab, "advancedTab"),
         ):
             widget.setObjectName(object_name)
@@ -238,6 +256,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self.addSubInterface(window_tab, FluentIcon.LAYOUT, "窗口")
         self.addSubInterface(shortcuts_tab, FluentIcon.COMMAND_PROMPT, "快捷键")
         self.addSubInterface(proactive_tab, FluentIcon.MEGAPHONE, "主动交互")
+        self.addSubInterface(tts_tab, FluentIcon.VOLUME, "语音")
         self.addSubInterface(advanced_tab, FluentIcon.DEVELOPER_TOOLS, "高级")
 
         self._load_persona()
@@ -249,6 +268,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._load_proactive()
         self._load_advanced()
         self._load_computer_use()
+        self._load_tts()
 
         save_button = PrimaryPushButton("保存", self)
         save_button.clicked.connect(self._on_save_clicked)
@@ -292,6 +312,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_proactive()
         self._collect_advanced()
         self._collect_computer_use()
+        self._collect_tts()
         return self._settings.model_copy(deep=True)
 
     def _add_numeric_validation(
@@ -855,6 +876,78 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         computer_use.settle_delay_s = _parse_float(
             self._computer_use_settle_delay_edit.text(), default=computer_use.settle_delay_s
         )
+
+    def _build_tts_tab(self) -> QWidget:
+        container = QWidget(self)
+        form = QFormLayout(container)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self._tts_form = form
+        form.addRow(self._tts_enabled_box)
+
+        for provider in TTSProviderName:
+            self._tts_provider_combo.addItem(_TTS_PROVIDER_LABELS[provider])
+        self._tts_provider_combo.currentIndexChanged.connect(self._on_tts_provider_changed)
+        form.addRow("引擎（provider）", self._tts_provider_combo)
+
+        # voice 两个引擎都用（edge 是 zh-CN-XiaoxiaoNeural 这类音库名，OpenAI 是 alloy 这类）
+        self._tts_voice_edit.setPlaceholderText("zh-CN-XiaoxiaoNeural / alloy")
+        form.addRow("音库（voice）", self._tts_voice_edit)
+
+        # edge 专用
+        self._tts_rate_edit.setPlaceholderText("+0%")
+        form.addRow("语速（如 +0%、-20%）", self._tts_rate_edit)
+        self._tts_volume_edit.setPlaceholderText("+0%")
+        form.addRow("音量（如 +0%、-50%）", self._tts_volume_edit)
+
+        # OpenAI 兼容专用
+        self._tts_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
+        form.addRow("API Key", self._tts_api_key_edit)
+        self._tts_base_url_edit.setPlaceholderText("https://api.openai.com/v1（可留空用默认）")
+        form.addRow("Base URL", self._tts_base_url_edit)
+        self._tts_model_edit.setPlaceholderText("tts-1")
+        form.addRow("模型（model）", self._tts_model_edit)
+
+        form.addRow(
+            CaptionLabel(
+                "Edge 免 Key 但必须联网；OpenAI 兼容需填 Key/Base URL；改动需重启 Miku 才能生效",
+                container,
+            )
+        )
+        return container
+
+    def _on_tts_provider_changed(self, index: int) -> None:
+        """按所选引擎显隐字段：edge 露语速/音量，OpenAI 兼容露 Key/Base URL/模型。"""
+        provider = list(TTSProviderName)[index]
+        is_edge = provider is TTSProviderName.EDGE
+        self._tts_form.setRowVisible(self._tts_rate_edit, is_edge)
+        self._tts_form.setRowVisible(self._tts_volume_edit, is_edge)
+        self._tts_form.setRowVisible(self._tts_api_key_edit, not is_edge)
+        self._tts_form.setRowVisible(self._tts_base_url_edit, not is_edge)
+        self._tts_form.setRowVisible(self._tts_model_edit, not is_edge)
+
+    def _load_tts(self) -> None:
+        tts = self._settings.tts
+        self._tts_enabled_box.setChecked(tts.enabled)
+        self._tts_provider_combo.setCurrentIndex(list(TTSProviderName).index(tts.provider))
+        self._tts_voice_edit.setText(tts.voice)
+        self._tts_rate_edit.setText(tts.rate)
+        self._tts_volume_edit.setText(tts.volume)
+        self._tts_api_key_edit.setText(tts.api_key or "")
+        self._tts_base_url_edit.setText(tts.base_url or "")
+        self._tts_model_edit.setText(tts.model)
+        self._on_tts_provider_changed(self._tts_provider_combo.currentIndex())
+
+    def _collect_tts(self) -> None:
+        defaults = TTSConfig()
+        tts = self._settings.tts
+        tts.enabled = self._tts_enabled_box.isChecked()
+        tts.provider = list(TTSProviderName)[self._tts_provider_combo.currentIndex()]
+        tts.voice = self._tts_voice_edit.text().strip() or defaults.voice
+        tts.rate = self._tts_rate_edit.text().strip() or defaults.rate
+        tts.volume = self._tts_volume_edit.text().strip() or defaults.volume
+        tts.api_key = self._tts_api_key_edit.text().strip() or None
+        tts.base_url = self._tts_base_url_edit.text().strip() or None
+        tts.model = self._tts_model_edit.text().strip() or defaults.model
 
     def _on_save_clicked(self) -> None:
         settings = self.current_settings()

@@ -36,6 +36,10 @@ dependencies = [
     "agent-client-protocol>=0.10.1",
     "psutil>=7.2.2",
     "pyperclip>=1.11.0",
+    # TTS（文字转语音）：edge-tts 调微软 Edge 在线语音，免 Key、离线不可用；
+    # elevenlabs 官方 SDK 用于 ElevenLabs 引擎（OpenAI 兼容引擎复用 openai SDK）
+    "edge-tts>=7.0.0",
+    "elevenlabs>=2.0",
 ]
 
 [project.optional-dependencies]
