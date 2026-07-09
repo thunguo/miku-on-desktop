@@ -1,9 +1,10 @@
 """朗读文本生成 + 30 秒录音的可复用步骤组件。
 
 克隆向导第 3 步与"更换声音"对话框的"重新录音克隆"模式共用这一组件：``start()``
-触发朗读文本生成，文本淡入后才启动 ``AudioRecorderWidget``（避免 LLM 延迟占用 30 秒
-录音窗口）。录音完成/麦克风不可用两种终态分别对应 ``recorded``/``skip_requested``
-信号，调用方据此决定是否继续声音克隆。
+触发朗读文本生成，文本淡入后展示"开始录制"按钮，用户读完并点击后才启动
+``AudioRecorderWidget``——不自动开录，把"读稿子"和"计时录音"这两个动作分开，避免
+文本刚出现用户还没看完就已经在倒计时。录音完成/麦克风不可用两种终态分别对应
+``recorded``/``skip_requested`` 信号，调用方据此决定是否继续声音克隆。
 
 跟 ``AudioRecorderWidget``/``CameraCaptureWidget`` 同款约定：构造后处于静止状态，调用方
 显式调 ``start()`` 才开始工作——真正触碰线程/硬件的私有方法（``_start_script_generation``）
@@ -35,7 +36,8 @@ _SCRIPT_HEIGHT = 120
 
 
 class ReadingRecordingStepWidget(QWidget):
-    """朗读文本生成 + 30 秒录音；``recorded`` 携带最终 WAV bytes，``skip_requested`` 表示跳过。"""
+    """朗读文本生成 + 点击开始 + 30 秒录音；``recorded`` 携带最终 WAV bytes，``skip_requested``
+    表示跳过。"""
 
     recorded = Signal(bytes)
     skip_requested = Signal()
@@ -82,6 +84,11 @@ class ReadingRecordingStepWidget(QWidget):
         self._recorder.seconds_remaining_changed.connect(self._on_seconds_remaining_changed)
         layout.addWidget(self._recorder)
 
+        self._start_recording_button = PrimaryPushButton("开始录制", self)
+        self._start_recording_button.clicked.connect(self._on_start_recording_clicked)
+        self._start_recording_button.hide()
+        layout.addWidget(self._start_recording_button)
+
         self._countdown_label = CaptionLabel("", self)
         self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._countdown_label)
@@ -118,6 +125,7 @@ class ReadingRecordingStepWidget(QWidget):
         self._recording_available = True
         self._recorded_bytes = None
         self._error_label.hide()
+        self._start_recording_button.hide()
         self._next_button.setEnabled(False)
         self._next_button.setText("下一步")
         self._countdown_label.setText("")
@@ -145,6 +153,10 @@ class ReadingRecordingStepWidget(QWidget):
         fade.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         self._fade_anim = fade
 
+        self._start_recording_button.show()
+
+    def _on_start_recording_clicked(self) -> None:
+        self._start_recording_button.hide()
         self._recorder.start()
 
     def _on_script_failed(self, message: str) -> None:

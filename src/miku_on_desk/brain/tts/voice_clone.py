@@ -28,9 +28,20 @@ class VoiceCloneConfig:
     description: str | None = None
 
 
+def _normalize_base_url(base_url: str | None) -> str | None:
+    """去掉用户习惯性带上的 ``/v1`` 后缀——SDK 内部会自己拼 ``/v1/voices/add``，
+    base_url 若已含 ``/v1`` 会拼成 ``/v1/v1/...`` 导致 404。"""
+    if not base_url:
+        return None
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1"):
+        normalized = normalized[: -len("/v1")]
+    return normalized or None
+
+
 def clone_voice(config: VoiceCloneConfig) -> str:
     """调用 IVC 克隆声音，返回新声音的 ``voice_id``。"""
-    client = ElevenLabs(api_key=config.api_key, base_url=config.base_url or None)
+    client = ElevenLabs(api_key=config.api_key, base_url=_normalize_base_url(config.base_url))
     try:
         response = client.voices.ivc.create(
             name=config.name,

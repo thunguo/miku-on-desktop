@@ -20,6 +20,7 @@ from miku_on_desk.config.settings import (
     ProactiveConfig,
     ProviderConfig,
     ProviderName,
+    VoiceCloningConfig,
 )
 from miku_on_desk.face.ui.settings_panel import (
     _QWEN_BASE_URL,
@@ -476,6 +477,47 @@ def test_current_settings_collects_edited_computer_use_fields(qapp: QApplication
 
     computer_use = panel.current_settings().computer_use
     assert computer_use == ComputerUseConfig(enabled=True, settle_delay_s=1.5)
+
+
+def test_voice_cloning_fields_load_from_settings(qapp: QApplication) -> None:
+    settings = AppSettings()
+    settings.voice_cloning = VoiceCloningConfig(
+        elevenlabs_api_key="el-key", elevenlabs_base_url="https://el.example.com"
+    )
+
+    panel = SettingsPanel(settings, Path("unused.json"))
+
+    assert panel._voice_cloning_api_key_edit.text() == "el-key"
+    assert panel._voice_cloning_base_url_edit.text() == "https://el.example.com"
+
+
+def test_current_settings_collects_edited_voice_cloning_fields(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(), Path("unused.json"))
+
+    panel._voice_cloning_api_key_edit.setText("el-key")
+    panel._voice_cloning_base_url_edit.setText("https://el.example.com")
+
+    voice_cloning = panel.current_settings().voice_cloning
+    assert voice_cloning == VoiceCloningConfig(
+        elevenlabs_api_key="el-key", elevenlabs_base_url="https://el.example.com"
+    )
+
+
+def test_current_settings_collects_empty_voice_cloning_fields_as_none(
+    qapp: QApplication,
+) -> None:
+    settings = AppSettings()
+    settings.voice_cloning = VoiceCloningConfig(
+        elevenlabs_api_key="el-key", elevenlabs_base_url="https://el.example.com"
+    )
+    panel = SettingsPanel(settings, Path("unused.json"))
+
+    panel._voice_cloning_api_key_edit.setText("")
+    panel._voice_cloning_base_url_edit.setText("")
+
+    voice_cloning = panel.current_settings().voice_cloning
+    assert voice_cloning.elevenlabs_api_key is None
+    assert voice_cloning.elevenlabs_base_url is None
 
 
 def test_shortcuts_tab_defaults_to_shift_ctrl_y_and_n(qapp: QApplication) -> None:

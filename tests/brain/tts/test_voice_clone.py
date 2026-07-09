@@ -97,6 +97,38 @@ def test_clone_voice_uses_api_key_and_base_url(monkeypatch: pytest.MonkeyPatch) 
     assert instance.base_url == "https://elevenlabs.example.com"
 
 
+def test_clone_voice_strips_trailing_v1_from_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(voice_clone_module, "ElevenLabs", _FakeElevenLabs)
+
+    clone_voice(_config(base_url="https://elevenlabs.example.com/v1"))
+
+    instance = _FakeElevenLabs.last_instance
+    assert instance is not None
+    assert instance.base_url == "https://elevenlabs.example.com"
+
+
+def test_clone_voice_strips_trailing_slash_and_v1_from_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(voice_clone_module, "ElevenLabs", _FakeElevenLabs)
+
+    clone_voice(_config(base_url="https://elevenlabs.example.com/v1/"))
+
+    instance = _FakeElevenLabs.last_instance
+    assert instance is not None
+    assert instance.base_url == "https://elevenlabs.example.com"
+
+
+def test_clone_voice_passes_none_base_url_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(voice_clone_module, "ElevenLabs", _FakeElevenLabs)
+
+    clone_voice(_config(base_url=None))
+
+    instance = _FakeElevenLabs.last_instance
+    assert instance is not None
+    assert instance.base_url is None
+
+
 def test_clone_voice_wraps_sdk_exception_into_voice_clone_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

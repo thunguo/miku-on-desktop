@@ -187,8 +187,6 @@ class CharacterCloneDialog(QWidget):
         self._settings: AppSettings | None = None
 
         self._generation_config: GenerationConfig | None = None
-        self._elevenlabs_api_key: str | None = None
-        self._elevenlabs_base_url: str | None = None
         self._captured_photo_bytes: bytes | None = None
         self._recorded_wav_bytes: bytes | None = None
         self._voice_skipped = False
@@ -263,15 +261,6 @@ class CharacterCloneDialog(QWidget):
         self._model_combo.addItems(list(_MODEL_CHOICES))
         form.addRow("模型", self._model_combo)
 
-        self._elevenlabs_base_url_edit = LineEdit(container)
-        self._elevenlabs_base_url_edit.setPlaceholderText("默认官方地址")
-        form.addRow("ElevenLabs API Base URL", self._elevenlabs_base_url_edit)
-
-        self._elevenlabs_api_key_edit = LineEdit(container)
-        self._elevenlabs_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
-        self._elevenlabs_api_key_edit.setPlaceholderText("留空则跳过声音克隆")
-        form.addRow("ElevenLabs API Key", self._elevenlabs_api_key_edit)
-
         layout.addLayout(form)
         layout.addStretch(1)
 
@@ -299,15 +288,11 @@ class CharacterCloneDialog(QWidget):
         if image_generation.model in _MODEL_CHOICES:
             self._model_combo.setCurrentText(image_generation.model)
 
-        voice_cloning = settings.voice_cloning
-        self._elevenlabs_base_url_edit.setText(voice_cloning.elevenlabs_base_url or "")
-        self._elevenlabs_api_key_edit.setText(voice_cloning.elevenlabs_api_key or "")
-
     def _show_error(self, message: str) -> None:
         self._error_label.setText(message)
         self._error_label.show()
 
-    def _validate_form(self) -> tuple[GenerationConfig, str | None, str | None] | None:
+    def _validate_form(self) -> GenerationConfig | None:
         name = self._name_edit.text().strip()
         if not _NAME_PATTERN.match(name):
             self._show_error("角色名称只能包含字母、数字、下划线、短横线，且不能为空")
@@ -325,7 +310,7 @@ class CharacterCloneDialog(QWidget):
         description = self._description_edit.toPlainText().strip() or _DEFAULT_DESCRIPTION
 
         self._error_label.hide()
-        config = GenerationConfig(
+        return GenerationConfig(
             pet_name=name,
             description=description,
             output_dir=output_dir,
@@ -333,18 +318,12 @@ class CharacterCloneDialog(QWidget):
             api_key=api_key,
             base_url=self._base_url_edit.text().strip() or None,
         )
-        elevenlabs_api_key = self._elevenlabs_api_key_edit.text().strip() or None
-        elevenlabs_base_url = self._elevenlabs_base_url_edit.text().strip() or None
-        return config, elevenlabs_api_key, elevenlabs_base_url
 
     def _on_form_next_clicked(self) -> None:
-        validated = self._validate_form()
-        if validated is None:
+        config = self._validate_form()
+        if config is None:
             return
-        config, elevenlabs_api_key, elevenlabs_base_url = validated
         self._generation_config = config
-        self._elevenlabs_api_key = elevenlabs_api_key
-        self._elevenlabs_base_url = elevenlabs_base_url
 
         settings = self._settings if self._settings is not None else AppSettings.load(
             self._settings_path
@@ -352,8 +331,6 @@ class CharacterCloneDialog(QWidget):
         settings.image_generation.api_key = config.api_key
         settings.image_generation.base_url = config.base_url
         settings.image_generation.model = config.model
-        settings.voice_cloning.elevenlabs_api_key = elevenlabs_api_key
-        settings.voice_cloning.elevenlabs_base_url = elevenlabs_base_url
         if self._vault is not None:
             save_settings_with_vault(settings, self._settings_path, self._vault)
         else:
@@ -489,15 +466,20 @@ class CharacterCloneDialog(QWidget):
 
     def _show_generation_page(self) -> None:
         config = self._generation_config
+        settings = self._settings
         assert config is not None
+        assert settings is not None
         if self._captured_photo_bytes is not None:
             config = self._config_with_reference_photo(config, self._captured_photo_bytes)
             self._generation_config = config
         self._output_dir = config.output_dir
 
+        elevenlabs_api_key = settings.voice_cloning.elevenlabs_api_key
+        elevenlabs_base_url = settings.voice_cloning.elevenlabs_base_url
+
         self._pixel_result = None
         self._voice_result = None
-        self._voice_skipped = self._recorded_wav_bytes is None or not self._elevenlabs_api_key
+        self._voice_skipped = self._recorded_wav_bytes is None or not elevenlabs_api_key
 
         progress_view = _GenerationProgressView(config.frame_width, config.frame_height, self)
         progress_view.cancel_requested.connect(self._on_cancel_generation)
@@ -529,12 +511,12 @@ class CharacterCloneDialog(QWidget):
             return
 
         assert self._recorded_wav_bytes is not None
-        assert self._elevenlabs_api_key is not None
+        assert elevenlabs_api_key is not None
         voice_config = VoiceCloneConfig(
             name=config.pet_name,
             audio_bytes=self._recorded_wav_bytes,
-            api_key=self._elevenlabs_api_key,
-            base_url=self._elevenlabs_base_url,
+            api_key=elevenlabs_api_key,
+            base_url=elevenlabs_base_url,
         )
         voice_card.start_cloning()
         voice_worker = VoiceCloneWorker(voice_config, self)

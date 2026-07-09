@@ -53,7 +53,7 @@ def test_start_calls_start_script_generation(
     assert calls == [True]
 
 
-def test_on_script_ready_shows_text_and_starts_recorder(
+def test_on_script_ready_shows_text_and_start_button_without_recording(
     qapp: QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     widget = ReadingRecordingStepWidget(ModelRouterConfig(), "一个爱笑的猫娘")
@@ -64,6 +64,21 @@ def test_on_script_ready_shows_text_and_starts_recorder(
 
     assert widget._script_edit.toPlainText() == "你今天心情怎么样呀"
     assert widget._worker is None
+    assert not widget._start_recording_button.isHidden()
+    assert started == []
+
+
+def test_start_recording_button_click_hides_button_and_starts_recorder(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget = ReadingRecordingStepWidget(ModelRouterConfig(), "一个爱笑的猫娘")
+    started: list[bool] = []
+    monkeypatch.setattr(widget._recorder, "start", lambda: started.append(True))
+    widget._on_script_ready("你今天心情怎么样呀")
+
+    widget._start_recording_button.click()
+
+    assert widget._start_recording_button.isHidden()
     assert started == [True]
 
 
@@ -170,6 +185,7 @@ def test_start_script_generation_resets_state_for_retry(
     assert widget._recording_available is True
     assert widget._recorded_bytes is None
     assert widget._error_label.isHidden()
+    assert widget._start_recording_button.isHidden()
     assert widget._next_button.text() == "下一步"
     assert not widget._next_button.isEnabled()
     assert widget._worker is not None

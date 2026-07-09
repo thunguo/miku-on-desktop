@@ -93,36 +93,28 @@ def test_validate_form_uses_default_description_when_blank(
     dialog = CharacterCloneDialog(tmp_path / "assets_pets", tmp_path / "settings.json")
     _fill_valid_form(dialog)
 
-    result = dialog._validate_form()
+    config = dialog._validate_form()
 
-    assert result is not None
-    config, _elevenlabs_api_key, _elevenlabs_base_url = result
+    assert config is not None
     assert config.description == _DEFAULT_DESCRIPTION
 
 
-def test_validate_form_returns_config_and_elevenlabs_fields_for_valid_input(
-    qapp: QApplication, tmp_path: Path
-) -> None:
+def test_validate_form_returns_config_for_valid_input(qapp: QApplication, tmp_path: Path) -> None:
     assets_dir = tmp_path / "assets_pets"
     dialog = CharacterCloneDialog(assets_dir, tmp_path / "settings.json")
     _fill_valid_form(dialog)
     dialog._description_edit.setPlainText("一个爱笑的猫娘")
-    dialog._elevenlabs_api_key_edit.setText("el-key")
-    dialog._elevenlabs_base_url_edit.setText("https://el.example.com")
 
-    result = dialog._validate_form()
+    config = dialog._validate_form()
 
-    assert result is not None
-    config, elevenlabs_api_key, elevenlabs_base_url = result
+    assert config is not None
     assert config.pet_name == "new_pet"
     assert config.description == "一个爱笑的猫娘"
     assert config.output_dir == assets_dir / "new_pet"
     assert config.api_key == "sk-test"
-    assert elevenlabs_api_key == "el-key"
-    assert elevenlabs_base_url == "https://el.example.com"
 
 
-def test_prefill_from_settings_populates_image_and_voice_cloning_credentials(
+def test_prefill_from_settings_loads_image_and_voice_cloning_credentials(
     qapp: QApplication, tmp_path: Path
 ) -> None:
     settings_path = tmp_path / "settings.json"
@@ -140,18 +132,21 @@ def test_prefill_from_settings_populates_image_and_voice_cloning_credentials(
     assert dialog._api_key_edit.text() == "sk-image"
     assert dialog._base_url_edit.text() == "https://img.example.com"
     assert dialog._model_combo.currentText() == "gpt-image-1"
-    assert dialog._elevenlabs_api_key_edit.text() == "el-key"
-    assert dialog._elevenlabs_base_url_edit.text() == "https://el.example.com"
+    assert dialog._settings is not None
+    assert dialog._settings.voice_cloning.elevenlabs_api_key == "el-key"
+    assert dialog._settings.voice_cloning.elevenlabs_base_url == "https://el.example.com"
 
 
-def test_on_form_next_clicked_persists_settings_and_advances_to_photo_page(
+def test_on_form_next_clicked_persists_image_settings_and_advances_to_photo_page(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _force_no_camera_devices(monkeypatch)
     settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.voice_cloning = VoiceCloningConfig(elevenlabs_api_key="el-key")
+    settings.save(settings_path)
     dialog = CharacterCloneDialog(tmp_path / "assets_pets", settings_path)
     _fill_valid_form(dialog)
-    dialog._elevenlabs_api_key_edit.setText("el-key")
 
     dialog._on_form_next_clicked()
 
@@ -234,6 +229,52 @@ def test_on_recording_skipped_clears_bytes_and_advances(
 
     assert dialog._recorded_wav_bytes is None
     assert advanced == [True]
+
+
+def test_show_generation_page_reads_elevenlabs_credentials_from_settings(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(CharacterGenerationWorker, "start", lambda self: None)
+    monkeypatch.setattr(VoiceCloneWorker, "start", lambda self: None)
+
+    settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.voice_cloning = VoiceCloningConfig(
+        elevenlabs_api_key="el-key", elevenlabs_base_url="https://el.example.com"
+    )
+    settings.save(settings_path)
+
+    assets_dir = tmp_path / "assets_pets"
+    dialog = CharacterCloneDialog(assets_dir, settings_path)
+    dialog._generation_config = GenerationConfig(
+        pet_name="new_pet", description="d", output_dir=assets_dir / "new_pet", api_key="sk-test"
+    )
+    dialog._recorded_wav_bytes = b"wav-bytes"
+
+    dialog._show_generation_page()
+
+    assert dialog._voice_skipped is False
+    assert dialog._voice_worker is not None
+    assert dialog._voice_worker._config.api_key == "el-key"
+    assert dialog._voice_worker._config.base_url == "https://el.example.com"
+
+
+def test_show_generation_page_skips_voice_when_settings_has_no_elevenlabs_key(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(CharacterGenerationWorker, "start", lambda self: None)
+
+    assets_dir = tmp_path / "assets_pets"
+    dialog = CharacterCloneDialog(assets_dir, tmp_path / "settings.json")
+    dialog._generation_config = GenerationConfig(
+        pet_name="new_pet", description="d", output_dir=assets_dir / "new_pet", api_key="sk-test"
+    )
+    dialog._recorded_wav_bytes = b"wav-bytes"
+
+    dialog._show_generation_page()
+
+    assert dialog._voice_skipped is True
+    assert dialog._voice_worker is None
 
 
 def test_config_with_reference_photo_writes_temp_file_and_sets_selfie_kind(

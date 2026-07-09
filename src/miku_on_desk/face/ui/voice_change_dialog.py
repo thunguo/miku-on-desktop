@@ -139,7 +139,7 @@ class VoiceChangeDialog(QWidget):
     def _show_record_mode(self) -> None:
         if not self._settings.voice_cloning.elevenlabs_api_key:
             self._mode_error_label.setText(
-                "未填写 ElevenLabs API Key，请先在“克隆角色”表单页填写后再试"
+                "未填写 ElevenLabs API Key，请先在设置面板的“语音”标签页填写后再试"
             )
             self._mode_error_label.show()
             return
