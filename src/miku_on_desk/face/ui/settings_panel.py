@@ -214,6 +214,8 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_api_key_edit = LineEdit(self)
         self._tts_base_url_edit = LineEdit(self)
         self._tts_model_edit = LineEdit(self)
+        self._voice_cloning_api_key_edit = LineEdit(self)
+        self._voice_cloning_base_url_edit = LineEdit(self)
 
         self._mcp_editor = _McpServerListEditor(self._settings.mcp_servers, self)
         self._agent_editor = _AgentProfileListEditor(self._settings.agent_profiles, self)
@@ -269,6 +271,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._load_advanced()
         self._load_computer_use()
         self._load_tts()
+        self._load_voice_cloning()
 
         save_button = PrimaryPushButton("保存", self)
         save_button.clicked.connect(self._on_save_clicked)
@@ -313,6 +316,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_advanced()
         self._collect_computer_use()
         self._collect_tts()
+        self._collect_voice_cloning()
         return self._settings.model_copy(deep=True)
 
     def _add_numeric_validation(
@@ -878,8 +882,12 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         )
 
     def _build_tts_tab(self) -> QWidget:
-        container = QWidget(self)
-        form = QFormLayout(container)
+        outer = QWidget()
+        layout = QVBoxLayout(outer)
+
+        tts_card = HeaderCardWidget("语音朗读（TTS）", self)
+        tts_container = QWidget(tts_card)
+        form = QFormLayout(tts_container)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self._tts_form = form
         form.addRow(self._tts_enabled_box)
@@ -910,10 +918,45 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         form.addRow(
             CaptionLabel(
                 "Edge 免 Key 但必须联网；OpenAI 兼容需填 Key/Base URL；改动需重启 Miku 才能生效",
-                container,
+                tts_container,
             )
         )
-        return container
+        tts_card.viewLayout.addWidget(tts_container)
+        layout.addWidget(tts_card)
+
+        voice_cloning_card = HeaderCardWidget(
+            "声音克隆（ElevenLabs Instant Voice Cloning）", self
+        )
+        voice_cloning_container = QWidget(voice_cloning_card)
+        voice_cloning_form = QFormLayout(voice_cloning_container)
+        voice_cloning_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self._voice_cloning_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
+        self._voice_cloning_api_key_edit.setPlaceholderText("留空则跳过声音克隆")
+        voice_cloning_form.addRow("ElevenLabs API Key", self._voice_cloning_api_key_edit)
+        self._voice_cloning_base_url_edit.setPlaceholderText(
+            "默认官方地址；自定义时不要带 /v1 后缀"
+        )
+        voice_cloning_form.addRow(
+            "ElevenLabs API Base URL", self._voice_cloning_base_url_edit
+        )
+        voice_cloning_form.addRow(
+            CaptionLabel(
+                "跟上方 TTS 播放凭证互相独立，用于「克隆角色」/「更换声音」的录音克隆步骤",
+                voice_cloning_container,
+            )
+        )
+        voice_cloning_card.viewLayout.addWidget(voice_cloning_container)
+        layout.addWidget(voice_cloning_card)
+        layout.addStretch(1)
+
+        scroll_area = SingleDirectionScrollArea(self)
+        scroll_area.setWidget(outer)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea{background: transparent; border: none}")
+        outer.setStyleSheet("QWidget{background: transparent}")
+        return cast(QWidget, scroll_area)
 
     def _on_tts_provider_changed(self, index: int) -> None:
         """按所选引擎显隐字段：edge 露语速/音量，OpenAI 兼容露 Key/Base URL/模型。"""
@@ -948,6 +991,20 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         tts.api_key = self._tts_api_key_edit.text().strip() or None
         tts.base_url = self._tts_base_url_edit.text().strip() or None
         tts.model = self._tts_model_edit.text().strip() or defaults.model
+
+    def _load_voice_cloning(self) -> None:
+        voice_cloning = self._settings.voice_cloning
+        self._voice_cloning_api_key_edit.setText(voice_cloning.elevenlabs_api_key or "")
+        self._voice_cloning_base_url_edit.setText(voice_cloning.elevenlabs_base_url or "")
+
+    def _collect_voice_cloning(self) -> None:
+        voice_cloning = self._settings.voice_cloning
+        voice_cloning.elevenlabs_api_key = (
+            self._voice_cloning_api_key_edit.text().strip() or None
+        )
+        voice_cloning.elevenlabs_base_url = (
+            self._voice_cloning_base_url_edit.text().strip() or None
+        )
 
     def _on_save_clicked(self) -> None:
         settings = self.current_settings()

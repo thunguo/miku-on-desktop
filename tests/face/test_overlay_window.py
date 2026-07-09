@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from PIL import Image
@@ -1083,6 +1084,21 @@ def test_set_pet_dir_replaces_sprite_widget_and_resets_state_machine(
     assert window._sprite_widget is not original_sprite_widget
     assert window._sprite_widget.width() == other_frame_size
     assert window.width() == other_frame_size
+
+
+
+def test_set_speech_controller_replaces_internal_reference(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """设置保存后的 TTS 热重载靠这个 setter 同步身份——``_speech_controller`` 是构造时
+    赋值一次的普通属性，不会像 ``main()`` 里的同名局部变量一样自动跟着后绑定生效。
+    """
+    window = _make_window(tmp_path)
+    new_controller = Mock()
+
+    window.set_speech_controller(new_controller)
+
+    assert window._speech_controller is new_controller
 
 
 def test_set_pet_dir_new_sprite_widget_is_visible_after_window_shown(

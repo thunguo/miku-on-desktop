@@ -254,7 +254,8 @@ class TTSConfig(BaseModel):
       ``model``（如 ``tts-1``）/``voice``（如 ``alloy``）。``api_key`` 经 vault 加密存储，
       磁盘上只留引用，与各对话 Provider 的 key 一致。
 
-    改动后需重启应用生效，与 persona/proactive 等设置一致。
+    设置面板保存后立即热切换生效（``main.py::_resolve_speech_controller_for_settings``），
+    不需要重启应用。
     """
 
     enabled: bool = False
@@ -299,6 +300,13 @@ class ImageGenerationConfig(BaseModel):
     model: str = "gpt-image-1"
 
 
+class VoiceCloningConfig(BaseModel):
+    """声音克隆（ElevenLabs IVC）使用的凭证，跟全局 TTS provider 选型无关，独立保存。"""
+
+    elevenlabs_api_key: str | None = None
+    elevenlabs_base_url: str | None = None
+
+
 class AppSettings(BaseModel):
     """完整可配置项树，由设置面板读写，落盘为 JSON。"""
 
@@ -320,6 +328,7 @@ class AppSettings(BaseModel):
     memory_tuning: MemoryTuningConfig = Field(default_factory=MemoryTuningConfig)
     computer_use: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
+    voice_cloning: VoiceCloningConfig = Field(default_factory=VoiceCloningConfig)
 
     @classmethod
     def load(cls, path: Path) -> AppSettings:
@@ -340,6 +349,7 @@ def default_settings_path(bootstrap: EnvBootstrap | None = None) -> Path:
 _VAULT_REF_PREFIX = "vault-ref:"
 _IMAGE_GENERATION_VAULT_KEY = "image_generation_api_key"
 _TTS_VAULT_KEY = "tts_api_key"
+_VOICE_CLONING_VAULT_KEY = "voice_cloning_api_key"
 
 
 def _provider_vault_key(name: ProviderName) -> str:
@@ -393,6 +403,11 @@ def load_settings_with_vault(path: Path, vault: SecretVault) -> AppSettings:
     )
     migrated = migrated or tts_migrated
 
+    settings.voice_cloning.elevenlabs_api_key, voice_cloning_migrated = _migrate_or_resolve(
+        settings.voice_cloning.elevenlabs_api_key, _VOICE_CLONING_VAULT_KEY, vault
+    )
+    migrated = migrated or voice_cloning_migrated
+
     if migrated:
         save_settings_with_vault(settings, path, vault)
 
@@ -423,5 +438,10 @@ def save_settings_with_vault(settings: AppSettings, path: Path, vault: SecretVau
     if tts_key is not None and not tts_key.startswith(_VAULT_REF_PREFIX):
         vault.store(_TTS_VAULT_KEY, tts_key)
         disk_copy.tts.api_key = _vault_ref(_TTS_VAULT_KEY)
+
+    voice_cloning_key = disk_copy.voice_cloning.elevenlabs_api_key
+    if voice_cloning_key is not None and not voice_cloning_key.startswith(_VAULT_REF_PREFIX):
+        vault.store(_VOICE_CLONING_VAULT_KEY, voice_cloning_key)
+        disk_copy.voice_cloning.elevenlabs_api_key = _vault_ref(_VOICE_CLONING_VAULT_KEY)
 
     disk_copy.save(path)

@@ -476,6 +476,14 @@ class OverlayWindow(QWidget):
         self._position_stop_button()
         self.update()
 
+
+    def set_speech_controller(self, speech_controller: SpeechController | None) -> None:
+        """设置保存后 TTS 配置热重载时同步语音控制器身份（None ↔ 非 None，或整个换新实例）；
+        这个属性是构造时赋值一次的普通属性，不像 ``main()`` 里的同名局部变量能靠闭包后绑定
+        自动生效，需要显式同步。
+        """
+        self._speech_controller = speech_controller
+
     def _on_stop_clicked(self) -> None:
         if self._cancellation_gate is not None:
             self._cancellation_gate.request_stop()

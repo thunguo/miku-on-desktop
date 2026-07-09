@@ -13,14 +13,12 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 from PySide6.QtWidgets import QApplication, QWidget
+from qfluentwidgets import CaptionLabel
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
 from miku_on_desk.brain.memory.models import Entity, Fact
 from miku_on_desk.brain.memory.system import default_memory_system
-from miku_on_desk.brain.providers.anthropic_provider import AnthropicProvider
 from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
-from miku_on_desk.brain.providers.gemini_provider import GeminiProvider
-from miku_on_desk.brain.providers.openai_compatible_provider import OpenAICompatibleProvider
 from miku_on_desk.bridge.events import (
     BrainCrashed,
     BrainEventBus,
@@ -32,53 +30,33 @@ from miku_on_desk.config.settings import (
     AgentProfileConfig,
     AppSettings,
     EnvBootstrap,
-    ModelRouterConfig,
     ModelTier,
     PersonaConfig,
     ProviderConfig,
-    ProviderName,
+    TTSConfig,
+    TTSProviderName,
 )
-from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel
+from miku_on_desk.face.character_voice import PetVoiceConfig, save_pet_voice_config
+from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, CharacterStandTile
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
+from miku_on_desk.face.ui.speech_controller import SpeechController, _SynthWorker
 from miku_on_desk.main import (
     _append_reminder,
     _build_identity_prompt,
-    _build_providers,
     _extract_assistant_text,
     _format_agents_summary,
     _format_core_memory,
     _format_memory_index,
+    _open_character_clone_dialog,
     _open_character_creation_dialog,
     _open_memory_panel,
+    _open_voice_change_dialog,
     _rebase_history,
+    _resolve_speech_controller_for_settings,
     _run_brain_thread,
     _startup_health_warnings,
     _sync_agent_profiles,
 )
-
-
-def test_build_providers_only_constructs_enabled_providers() -> None:
-    config = ModelRouterConfig(
-        anthropic=ProviderConfig(api_key="sk-ant", models={ModelTier.FAST: "haiku"}),
-        openai=ProviderConfig(api_key=None, models={}),
-        gemini=ProviderConfig(api_key="sk-gemini", models={ModelTier.HEAVY: "gemini-pro"}),
-    )
-
-    providers = _build_providers(config)
-
-    assert set(providers) == {ProviderName.ANTHROPIC, ProviderName.GEMINI}
-    assert isinstance(providers[ProviderName.ANTHROPIC], AnthropicProvider)
-    assert isinstance(providers[ProviderName.GEMINI], GeminiProvider)
-
-
-def test_build_providers_constructs_openai_compatible_provider() -> None:
-    config = ModelRouterConfig(
-        openai=ProviderConfig(api_key="sk-openai", models={ModelTier.MEDIUM: "gpt-5"})
-    )
-
-    providers = _build_providers(config)
-
-    assert isinstance(providers[ProviderName.OPENAI], OpenAICompatibleProvider)
 
 
 def test_format_agents_summary_skips_disabled_profiles() -> None:
@@ -282,6 +260,50 @@ def test_character_created_hot_switches_window_and_persists_settings(
     assert gallery_panel._current_pet_dir == new_pet_dir
 
 
+def test_character_cloned_hot_switches_window_and_persists_settings(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """克隆向导完成后跟普通创建向导一样应立即热切换桌宠窗口并持久化 settings。"""
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    old_pet_dir = _make_pet_dir(assets_pets_dir, "old_pet")
+    new_pet_dir = _make_pet_dir(assets_pets_dir, "new_pet")
+    settings_path = tmp_path / "settings.json"
+
+    window = OverlayWindow(old_pet_dir)
+    window.show()
+    gallery_panel = CharacterGalleryPanel(assets_pets_dir, old_pet_dir)
+
+    dialog = _open_character_clone_dialog(window, gallery_panel, settings_path, [])
+    dialog.character_created.emit(new_pet_dir)
+
+    assert window._meta.pet_name == "new_pet"
+    assert window._sprite_widget.isVisibleTo(window) is True
+    assert AppSettings.load(settings_path).window.pet_dir == new_pet_dir
+    assert gallery_panel._current_pet_dir == new_pet_dir
+
+
+def test_voice_updated_refreshes_gallery_panel_badge(qapp: QApplication, tmp_path: Path) -> None:
+    """更换声音弹窗保存新绑定后，画廊里对应角色的"已绑定专属声音"标签要立即刷新出来，
+    不需要用户手动关掉重开画廊。
+    """
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    gallery_panel = CharacterGalleryPanel(assets_pets_dir, pet_dir)
+
+    dialog = _open_voice_change_dialog(pet_dir, gallery_panel, settings_path, [])
+    save_pet_voice_config(
+        pet_dir, PetVoiceConfig(provider=TTSProviderName.ELEVENLABS, voice="voice-123")
+    )
+    dialog.voice_updated.emit(pet_dir)
+
+    tile = gallery_panel.findChild(CharacterStandTile)
+    assert tile is not None
+    assert any("已绑定专属声音" in child.text() for child in tile.findChildren(CaptionLabel))
+
+
 def test_run_brain_thread_emits_brain_crashed_when_brain_main_raises(
     qapp: QApplication,
 ) -> None:
@@ -389,4 +411,75 @@ def test_startup_health_warnings_empty_when_everything_healthy(tmp_path: Path) -
         warnings = _startup_health_warnings(_enabled_settings(), bootstrap)
 
     assert warnings == []
+
+
+
+class _FakeTTSProvider:
+    async def synthesize(self, text: str) -> bytes:
+        return b""
+
+
+def test_resolve_speech_controller_for_settings_closes_and_returns_none_when_disabled(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    with patch.object(_SynthWorker, "start", lambda self: None):
+        controller = SpeechController(_FakeTTSProvider())
+
+        result = _resolve_speech_controller_for_settings(
+            AppSettings(tts=TTSConfig(enabled=False)), tmp_path, controller
+        )
+
+    assert result is None
+    assert not controller._temp_dir.exists()
+
+
+def test_resolve_speech_controller_for_settings_builds_new_controller_when_enabling(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    with patch.object(_SynthWorker, "start", lambda self: None):
+        result = _resolve_speech_controller_for_settings(
+            AppSettings(tts=TTSConfig(enabled=True)), tmp_path, None
+        )
+
+        assert result is not None
+        result.close()
+
+
+def test_resolve_speech_controller_for_settings_hot_swaps_provider_on_existing_controller(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    with patch.object(_SynthWorker, "start", lambda self: None):
+        controller = SpeechController(_FakeTTSProvider())
+        old_worker = controller._worker
+
+        result = _resolve_speech_controller_for_settings(
+            AppSettings(tts=TTSConfig(enabled=True, voice="zh-CN-YunxiNeural")),
+            tmp_path,
+            controller,
+        )
+
+        assert result is controller
+        assert result._worker is not old_worker
+        assert result._worker._provider._voice == "zh-CN-YunxiNeural"
+        result.close()
+
+
+def test_resolve_speech_controller_for_settings_keeps_old_controller_when_construction_fails(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    with patch.object(_SynthWorker, "start", lambda self: None):
+        controller = SpeechController(_FakeTTSProvider())
+        old_worker = controller._worker
+
+        with patch(
+            "miku_on_desk.brain.tts.factory.create_tts_provider",
+            side_effect=RuntimeError("炸了"),
+        ):
+            result = _resolve_speech_controller_for_settings(
+                AppSettings(tts=TTSConfig(enabled=True)), tmp_path, controller
+            )
+
+        assert result is controller
+        assert result._worker is old_worker
+        controller.close()
 

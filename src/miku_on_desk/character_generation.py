@@ -46,6 +46,19 @@ pixel-art character reference sheet for a desktop pet that combines the attached
 visual identity with this text concept: {description}
 """
 
+_REFERENCE_PROMPT_INTRO_SELFIE = """\
+The attached photo is a real selfie/webcam capture of a real person, and the framing likely only
+shows their head, face, and shoulders (no legs or feet visible). Use it purely as visual/thematic
+inspiration for an ORIGINAL chibi mascot — reinterpret the person's most distinctive visible traits
+(hair color/style/length, skin tone, glasses, notable clothing colors, general vibe) rather than
+reproducing the photo. You must INVENT a complete, plausible full body that is not shown in the
+photo — torso, arms, legs, and feet — with a simple, cute outfit consistent with what little
+clothing is visible near the shoulders. Do NOT reproduce the photo's cropping, camera angle, or
+composition; this is a full-body character design task, and the input photo only supplies
+facial/hair identity, nothing about the lower body. Design a single original chibi pixel-art
+character reference sheet combining this visual identity with this concept: {description}
+"""
+
 _REFERENCE_PROMPT_STYLE_BODY = """\
 Art style requirements (must look like genuine retro low-resolution pixel art, not a smooth
 digital illustration): render as if drawn on a small ~48x48 pixel grid and then scaled up with
@@ -106,6 +119,7 @@ class GenerationConfig:
     api_key: str | None = None
     base_url: str | None = None
     reference_image_path: Path | None = None
+    reference_image_kind: Literal["illustration", "selfie"] = "illustration"
     background: Literal["transparent", "opaque", "auto"] = "transparent"
 
 
@@ -267,12 +281,19 @@ def _mime_type_for(path: Path) -> str:
     return "image/png"
 
 
+def _reference_image_prompt_for_upload(config: GenerationConfig) -> str:
+    intro_template = (
+        _REFERENCE_PROMPT_INTRO_SELFIE
+        if config.reference_image_kind == "selfie"
+        else _REFERENCE_PROMPT_INTRO_WITH_IMAGE
+    )
+    return intro_template.format(description=config.description) + _REFERENCE_PROMPT_STYLE_BODY
+
+
 def _generate_reference_image_from_upload(client: OpenAI, config: GenerationConfig) -> Image.Image:
     assert config.reference_image_path is not None
     image_bytes = config.reference_image_path.read_bytes()
-    prompt = _REFERENCE_PROMPT_INTRO_WITH_IMAGE.format(
-        description=config.description
-    ) + _REFERENCE_PROMPT_STYLE_BODY
+    prompt = _reference_image_prompt_for_upload(config)
     response = client.images.edit(
         model=config.model,
         image=(
