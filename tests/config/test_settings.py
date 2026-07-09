@@ -24,6 +24,7 @@ from miku_on_desk.config.settings import (
     ShortcutsConfig,
     TTSConfig,
     TTSProviderName,
+    VoiceCloningConfig,
     load_settings_with_vault,
     save_settings_with_vault,
 )
@@ -290,6 +291,80 @@ def test_save_settings_with_vault_stores_tts_api_key_in_vault_not_on_disk(
         assert "sk-tts-plain" not in on_disk_text
         on_disk = json.loads(on_disk_text)
         assert on_disk["tts"]["api_key"].startswith("vault-ref:")
+    finally:
+        vault.close()
+
+
+def test_voice_cloning_config_defaults_to_no_credentials() -> None:
+    config = VoiceCloningConfig()
+
+    assert config.elevenlabs_api_key is None
+    assert config.elevenlabs_base_url is None
+
+
+def test_app_settings_voice_cloning_roundtrip_through_save_and_load(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.voice_cloning = VoiceCloningConfig(
+        elevenlabs_api_key="sk-elevenlabs-plain",
+        elevenlabs_base_url="https://api.elevenlabs.io",
+    )
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded.voice_cloning == settings.voice_cloning
+
+
+def test_app_settings_load_missing_voice_cloning_field_still_loads_with_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"window": {"x": 1}}), encoding="utf-8")
+
+    loaded = AppSettings.load(path)
+
+    assert loaded.voice_cloning == VoiceCloningConfig()
+
+
+def test_save_settings_with_vault_stores_voice_cloning_api_key_in_vault_not_on_disk(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.voice_cloning = VoiceCloningConfig(elevenlabs_api_key="sk-elevenlabs-plain")
+
+    vault = _make_vault(tmp_path)
+    try:
+        save_settings_with_vault(settings, settings_path, vault)
+        reloaded = load_settings_with_vault(settings_path, vault)
+
+        assert reloaded.voice_cloning.elevenlabs_api_key == "sk-elevenlabs-plain"
+        on_disk_text = settings_path.read_text(encoding="utf-8")
+        assert "sk-elevenlabs-plain" not in on_disk_text
+        on_disk = json.loads(on_disk_text)
+        assert on_disk["voice_cloning"]["elevenlabs_api_key"].startswith("vault-ref:")
+    finally:
+        vault.close()
+
+
+def test_load_settings_with_vault_migrates_legacy_plaintext_voice_cloning_api_key(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    legacy = AppSettings()
+    legacy.voice_cloning = VoiceCloningConfig(elevenlabs_api_key="sk-elevenlabs-legacy")
+    legacy.save(settings_path)
+
+    vault = _make_vault(tmp_path)
+    try:
+        loaded = load_settings_with_vault(settings_path, vault)
+
+        assert loaded.voice_cloning.elevenlabs_api_key == "sk-elevenlabs-legacy"
+        on_disk_text = settings_path.read_text(encoding="utf-8")
+        assert "sk-elevenlabs-legacy" not in on_disk_text
+        on_disk = json.loads(on_disk_text)
+        assert on_disk["voice_cloning"]["elevenlabs_api_key"].startswith("vault-ref:")
     finally:
         vault.close()
 

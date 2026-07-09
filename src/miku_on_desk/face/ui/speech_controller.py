@@ -133,6 +133,16 @@ class SpeechController(QObject):
 
         shutil.rmtree(self._temp_dir, ignore_errors=True)
 
+
+    def set_provider(self, provider: TTSProvider) -> None:
+        """运行时更换合成 provider（如切换角色绑定的声音）：打断当前播报，换一个新 worker。"""
+        self.stop()
+        self._worker.stop()
+        self._worker.wait(3000)
+        self._worker = _SynthWorker(provider, self)
+        self._worker.audio_ready.connect(self._on_audio_ready)
+        self._worker.start()
+
     def _on_audio_ready(self, generation: int, audio: bytes) -> None:
         if generation != self._generation:
             # 属于已被 stop() 打断的上一轮回复，丢弃。

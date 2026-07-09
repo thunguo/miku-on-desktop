@@ -10,9 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QGridLayout, QScrollArea, QVBoxLayout, QWidget
-from qfluentwidgets import CaptionLabel, PrimaryPushButton, StrongBodyLabel
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
+from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton, StrongBodyLabel
 
+from miku_on_desk.face.character_voice import load_pet_voice_config
 from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, SpriteSheetMetaError, frame_index
 from miku_on_desk.face.ui.sprite_widget import PetSpriteWidget
 from miku_on_desk.face.ui.theme import (
@@ -34,6 +35,7 @@ class CharacterStandTile(QWidget):
     """单个角色展台：循环播放该角色的 idle（或 fallback）动画 + 名称 + 切换按钮。"""
 
     switch_requested = Signal(Path)
+    voice_change_requested = Signal(Path)
 
     def __init__(
         self,
@@ -65,10 +67,22 @@ class CharacterStandTile(QWidget):
         name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(name_label)
 
+        if load_pet_voice_config(pet_dir) is not None:
+            voice_badge = CaptionLabel("🔊 已绑定专属声音", self)
+            voice_badge.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(voice_badge)
+
+        button_row = QHBoxLayout()
         button = PrimaryPushButton("当前角色" if is_current else "切换到此角色", self)
         button.setEnabled(not is_current)
         button.clicked.connect(lambda: self.switch_requested.emit(self._pet_dir))
-        layout.addWidget(button)
+        button_row.addWidget(button)
+
+        voice_button = PushButton("更换声音", self)
+        voice_button.clicked.connect(lambda: self.voice_change_requested.emit(self._pet_dir))
+        button_row.addWidget(voice_button)
+
+        layout.addLayout(button_row)
 
         self._idle_style = border_qss(TEAL_DARK) if is_current else ""
         self.setStyleSheet(f"CharacterStandTile {{ {self._idle_style} }}")
@@ -144,11 +158,49 @@ class _CreateCharacterTile(QWidget):
         self.clicked.emit()
 
 
+class _CloneCharacterTile(QWidget):
+    """"＋ 克隆"格，视觉上与 ``_CreateCharacterTile`` 完全一致，虚线边框区分于普通角色展台。"""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(160, 200)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._idle_style = border_qss(TEAL_MAIN, style="dashed")
+        self._hover_style = border_qss(HOVER_COLOR, style="dashed")
+        self._pressed_style = border_qss(PRESSED_COLOR, style="dashed")
+        self.setStyleSheet(f"_CloneCharacterTile {{ {self._idle_style} }}")
+        layout = QVBoxLayout(self)
+        label = CaptionLabel("＋ 克隆", self)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+
+    def enterEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CloneCharacterTile {{ {self._hover_style} }}")
+
+    def leaveEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CloneCharacterTile {{ {self._idle_style} }}")
+
+    def mousePressEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CloneCharacterTile {{ {self._pressed_style} }}")
+
+    def mouseReleaseEvent(self, event: object) -> None:
+        del event
+        self.setStyleSheet(f"_CloneCharacterTile {{ {self._hover_style} }}")
+        self.clicked.emit()
+
+
 class CharacterGalleryPanel(QWidget):
     """扫描 ``assets_pets_dir`` 下的角色目录，渲染展台网格 + "创建新角色"格。"""
 
     character_switched = Signal(Path)
     create_requested = Signal()
+    clone_requested = Signal()
+    voice_change_requested = Signal(Path)
 
     def __init__(
         self,
@@ -193,6 +245,7 @@ class CharacterGalleryPanel(QWidget):
             item = self._grid.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
 
         characters = self._scan_characters()
@@ -223,6 +276,7 @@ class CharacterGalleryPanel(QWidget):
                 parent=self._grid_container,
             )
             tile.switch_requested.connect(self._on_switch_requested)
+            tile.voice_change_requested.connect(self.voice_change_requested)
             self._grid.addWidget(tile, index // _COLUMNS + row_offset, index % _COLUMNS)
 
         create_tile = _CreateCharacterTile(self._grid_container)
@@ -230,6 +284,13 @@ class CharacterGalleryPanel(QWidget):
         create_index = len(characters)
         self._grid.addWidget(
             create_tile, create_index // _COLUMNS + row_offset, create_index % _COLUMNS
+        )
+
+        clone_tile = _CloneCharacterTile(self._grid_container)
+        clone_tile.clicked.connect(self.clone_requested)
+        clone_index = len(characters) + 1
+        self._grid.addWidget(
+            clone_tile, clone_index // _COLUMNS + row_offset, clone_index % _COLUMNS
         )
 
     def _on_switch_requested(self, pet_dir: Path) -> None:
@@ -240,4 +301,9 @@ class CharacterGalleryPanel(QWidget):
     def on_character_created(self, pet_dir: Path) -> None:
         """新角色生成完成后由调用方触发，切换当前选中项并重新扫描刷新网格。"""
         self._current_pet_dir = pet_dir
+        self._reload()
+
+
+    def refresh(self) -> None:
+        """外部状态（如某角色绑定的声音）发生变化后，重新扫描刷新网格，不改变当前选中项。"""
         self._reload()

@@ -26,6 +26,7 @@ from miku_on_desk.character_generation import (
     _decode_first_image,
     _effective_background,
     _quantize_preserving_alpha,
+    _reference_image_prompt_for_upload,
     assemble_spritesheet,
     postprocess_strip,
     qa_check,
@@ -297,3 +298,39 @@ def test_effective_background_does_not_override_explicit_non_transparent_choice(
     config = _config_with("gpt-image-2", "auto")
 
     assert _effective_background(config) == "auto"
+
+
+
+def test_reference_image_prompt_for_upload_selfie_kind_includes_invention_instruction() -> None:
+    config = GenerationConfig(
+        pet_name="test_pet",
+        description="一个爱笑的猫娘",
+        output_dir=Path("/tmp/unused"),
+        reference_image_kind="selfie",
+    )
+
+    prompt = _reference_image_prompt_for_upload(config)
+
+    assert "INVENT a complete, plausible full body" in prompt
+    assert "一个爱笑的猫娘" in prompt
+
+
+def test_reference_image_prompt_for_upload_illustration_kind_differs_from_selfie() -> None:
+    illustration_config = GenerationConfig(
+        pet_name="test_pet",
+        description="一个爱笑的猫娘",
+        output_dir=Path("/tmp/unused"),
+        reference_image_kind="illustration",
+    )
+    selfie_config = GenerationConfig(
+        pet_name="test_pet",
+        description="一个爱笑的猫娘",
+        output_dir=Path("/tmp/unused"),
+        reference_image_kind="selfie",
+    )
+
+    illustration_prompt = _reference_image_prompt_for_upload(illustration_config)
+    selfie_prompt = _reference_image_prompt_for_upload(selfie_config)
+
+    assert illustration_prompt != selfie_prompt
+    assert "INVENT a complete, plausible full body" not in illustration_prompt
