@@ -36,6 +36,7 @@ from miku_on_desk.config.settings import (
     ModelTier,
     PersonaConfig,
     ProviderConfig,
+    ShortcutsConfig,
     TTSConfig,
     TTSProviderName,
 )
@@ -57,6 +58,7 @@ from miku_on_desk.main import (
     _rebase_history,
     _resolve_speech_controller_for_settings,
     _run_brain_thread,
+    _shortcut_bindings,
     _startup_health_warnings,
     _sync_agent_profiles,
 )
@@ -538,6 +540,18 @@ def test_startup_health_warnings_empty_when_everything_healthy(tmp_path: Path) -
         warnings = _startup_health_warnings(_enabled_settings(), bootstrap)
 
     assert warnings == []
+
+
+def test_shortcut_bindings_maps_action_names_to_configured_sequences() -> None:
+    shortcuts = ShortcutsConfig(
+        open_chat="Ctrl+Alt+M", confirm_yes="Ctrl+Alt+Y", confirm_no="Ctrl+Alt+N"
+    )
+
+    assert _shortcut_bindings(shortcuts) == {
+        "open_chat": "Ctrl+Alt+M",
+        "confirm_yes": "Ctrl+Alt+Y",
+        "confirm_no": "Ctrl+Alt+N",
+    }
 
 
 

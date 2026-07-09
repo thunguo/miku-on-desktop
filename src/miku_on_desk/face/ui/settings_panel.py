@@ -185,6 +185,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._window_y_edit = LineEdit(self)
         self._window_scale_edit = LineEdit(self)
         self._window_always_on_top_box = CheckBox("始终置顶", self)
+        self._open_chat_edit = QKeySequenceEdit(self)
         self._confirm_yes_edit = QKeySequenceEdit(self)
         self._confirm_no_edit = QKeySequenceEdit(self)
         self._proactive_enabled_box = CheckBox("启用主动交互", self)
@@ -626,18 +627,27 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         container = QWidget(self)
         form = QFormLayout(container)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow("打开聊天", self._open_chat_edit)
         form.addRow("确认「是」", self._confirm_yes_edit)
         form.addRow("确认「否」", self._confirm_no_edit)
-        form.addRow(CaptionLabel("快捷键改动需要重启 Miku 才能生效", container))
+        form.addRow(
+            CaptionLabel(
+                "全局快捷键，无需 Miku 窗口获得焦点即可触发；保存后立即生效，无需重启。"
+                "macOS 需要在系统设置的「辅助功能」中为本应用授权。",
+                container,
+            )
+        )
         return container
 
     def _load_shortcuts(self) -> None:
         shortcuts = self._settings.shortcuts
+        self._open_chat_edit.setKeySequence(QKeySequence(shortcuts.open_chat))
         self._confirm_yes_edit.setKeySequence(QKeySequence(shortcuts.confirm_yes))
         self._confirm_no_edit.setKeySequence(QKeySequence(shortcuts.confirm_no))
 
     def _collect_shortcuts(self) -> None:
         shortcuts = self._settings.shortcuts
+        shortcuts.open_chat = self._open_chat_edit.keySequence().toString()
         shortcuts.confirm_yes = self._confirm_yes_edit.keySequence().toString()
         shortcuts.confirm_no = self._confirm_no_edit.keySequence().toString()
 

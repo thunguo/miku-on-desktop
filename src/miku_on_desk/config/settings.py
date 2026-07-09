@@ -220,8 +220,10 @@ class WindowConfig(BaseModel):
 
 
 class ShortcutsConfig(BaseModel):
-    """确认对话框（是/否）的键盘快捷键，默认在 mac/Windows 上是同一个物理键位组合。"""
+    """系统级全局快捷键（通过 pynput 监听，无需 Miku 窗口获得焦点即可触发），
+    默认在 mac/Windows 上是同一个物理键位组合。"""
 
+    open_chat: str = "Ctrl+Shift+M"
     confirm_yes: str = "Ctrl+Shift+Y"
     confirm_no: str = "Ctrl+Shift+N"
 
