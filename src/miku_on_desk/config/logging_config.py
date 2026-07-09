@@ -7,6 +7,8 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from miku_on_desk.brain.tracing import TRACE_LOGGER_NAME
+
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -16,7 +18,8 @@ _BACKUP_COUNT = 5
 
 
 def setup_logging(log_dir: Path, level: str = "INFO") -> None:
-    """配置根 logger：控制台 handler + 按大小轮转的文件 handler。
+    """配置根 logger：控制台 handler + 按大小轮转的文件 handler；另外单独配置一个不
+    冒泡到根 logger 的结构化 trace logger，写到独立的 ``trace.jsonl``。
 
     必须在应用启动时调用且只调用一次；重复调用会导致 handler 重复叠加，
     因此这里先清空已有 handler 再重新装配。
@@ -40,3 +43,17 @@ def setup_logging(log_dir: Path, level: str = "INFO") -> None:
     root_logger.handlers.clear()
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
+
+    trace_handler = RotatingFileHandler(
+        filename=log_dir / "trace.jsonl",
+        maxBytes=_MAX_BYTES,
+        backupCount=_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    trace_handler.setFormatter(logging.Formatter(fmt="%(message)s"))
+
+    trace_logger = logging.getLogger(TRACE_LOGGER_NAME)
+    trace_logger.setLevel(logging.DEBUG)
+    trace_logger.propagate = False
+    trace_logger.handlers.clear()
+    trace_logger.addHandler(trace_handler)

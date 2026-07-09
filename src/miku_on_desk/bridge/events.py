@@ -90,6 +90,18 @@ class BrainCrashed:
     """
 
     error: str
+    attempts: int = 1
+
+
+@dataclass(frozen=True)
+class BrainRestarting:
+    """崩溃后即将发起下一次自动重启；与 ``BrainCrashed`` 不同，这不是终局——线程还
+    活着，退避等待后会再跑一次 ``_brain_main``。"""
+
+    attempt: int
+    max_attempts: int
+    delay_s: float
+    error: str
 
 
 class ReactionKind(StrEnum):
@@ -117,6 +129,7 @@ BrainEvent = (
     | LoopFinished
     | ReactionTriggered
     | BrainCrashed
+    | BrainRestarting
 )
 
 

@@ -15,6 +15,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -35,6 +36,7 @@ from qfluentwidgets import MessageBox
 from miku_on_desk.brain.acp.manager import AcpManager, register_acp_delegate_tool
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile, default_agent_manager
 from miku_on_desk.brain.agents.spawn import register_spawn_agents_tool
+from miku_on_desk.brain.backoff import backoff_delay
 from miku_on_desk.brain.loop import (
     LoopCallbacks,
     LoopConfig,
@@ -66,6 +68,7 @@ from miku_on_desk.bridge.events import (
     AcpChunkReceived,
     BrainCrashed,
     BrainEventBus,
+    BrainRestarting,
     CancellationGate,
     ConfirmationGate,
     LoopFinished,
@@ -457,24 +460,59 @@ def _run_brain_thread(
     chat_input: queue.Queue[object],
     session_id: str,
     memory_system: MemorySystem,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    try:
-        asyncio.run(
-            _brain_main(
-                settings=settings,
-                bootstrap=bootstrap,
-                event_bus=event_bus,
-                confirm_gate=confirm_gate,
-                cancellation_gate=cancellation_gate,
-                message_queue=message_queue,
-                chat_input=chat_input,
-                session_id=session_id,
-                memory_system=memory_system,
+    resilience = settings.brain_resilience
+    max_attempts = resilience.max_restart_attempts if resilience.enabled else 1
+    attempt = 1
+
+    while True:
+        attempt_start = monotonic()
+        try:
+            asyncio.run(
+                _brain_main(
+                    settings=settings,
+                    bootstrap=bootstrap,
+                    event_bus=event_bus,
+                    confirm_gate=confirm_gate,
+                    cancellation_gate=cancellation_gate,
+                    message_queue=message_queue,
+                    chat_input=chat_input,
+                    session_id=session_id,
+                    memory_system=memory_system,
+                )
             )
-        )
-    except Exception as exc:
-        event_bus.emit_event(BrainCrashed(error=str(exc) or type(exc).__name__))
-        logger.exception("Brain 线程异常退出")
+            return
+        except Exception as exc:
+            error = str(exc) or type(exc).__name__
+            if monotonic() - attempt_start >= resilience.stable_run_threshold_s:
+                attempt = 1
+
+            if attempt >= max_attempts:
+                event_bus.emit_event(BrainCrashed(error=error, attempts=attempt))
+                logger.exception("Brain 线程异常退出（已达自动重启上限）")
+                return
+
+            delay = backoff_delay(
+                attempt - 1,
+                base_delay_s=resilience.base_delay_s,
+                max_delay_s=resilience.max_delay_s,
+            )
+            event_bus.emit_event(
+                BrainRestarting(
+                    attempt=attempt, max_attempts=max_attempts, delay_s=delay, error=error
+                )
+            )
+            logger.warning(
+                "Brain 线程崩溃，第 %d/%d 次自动重启将在 %.2f 秒后开始：%s",
+                attempt,
+                max_attempts,
+                delay,
+                error,
+            )
+            sleep(delay)
+            attempt += 1
 
 
 def _assets_pets_dir() -> Path:

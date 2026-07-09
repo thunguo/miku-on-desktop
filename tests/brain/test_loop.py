@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -21,161 +22,41 @@ from miku_on_desk.brain.loop import (
 from miku_on_desk.brain.model_router import ModelRouter
 from miku_on_desk.brain.providers.base import (
     Message,
-    OnContent,
-    OnThinking,
-    Provider,
     StreamResult,
+    StreamUsage,
     TextBlock,
-    ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
 )
-from miku_on_desk.brain.tools.path_sandbox import PathSandbox
-from miku_on_desk.brain.tools.policy import Decision, PolicyEngine, ToolPolicySpec
-from miku_on_desk.brain.tools.read_tracker import ReadTracker
-from miku_on_desk.brain.tools.registry import ToolRegistration, ToolRegistry
-from miku_on_desk.config.settings import ModelRouterConfig, ModelTier, ProviderConfig, ProviderName
-
-_SESSION = "session-1"
-_TIER = ModelTier.FAST
-
-
-class _FakeProvider(Provider):
-    def __init__(self, results: list[StreamResult]) -> None:
-        self._results = list(results)
-        self.calls: list[dict[str, Any]] = []
-
-    async def stream(
-        self,
-        *,
-        model: str,
-        system: str,
-        messages: list[Message],
-        tools: list[ToolDefinition],
-        on_content: OnContent | None = None,
-        on_thinking: OnThinking | None = None,
-        idle_timeout_s: float = 120.0,
-        hard_timeout_s: float = 600.0,
-    ) -> StreamResult:
-        self.calls.append(
-            {
-                "model": model,
-                "system": system,
-                "messages": [message.model_copy(deep=True) for message in messages],
-                "idle_timeout_s": idle_timeout_s,
-                "hard_timeout_s": hard_timeout_s,
-            }
-        )
-        if on_content is not None:
-            on_content("streamed-content")
-        if on_thinking is not None:
-            on_thinking("streamed-thinking")
-        return self._results.pop(0)
-
-
-async def _never_confirm(_tool_use: ToolUseBlock, _reason: str | None) -> bool:
-    raise AssertionError("confirm 在这个测试场景下不应该被调用")
-
-
-async def _ok_handler(_input: dict[str, Any]) -> str:
-    return "ok"
-
-
-def _tool_use(tool_use_id: str, name: str = "echo_tool") -> ToolUseBlock:
-    return ToolUseBlock(id=tool_use_id, name=name, input={})
-
-
-def _make_registry(tmp_path: Path, *, trusted_mode: bool = True) -> ToolRegistry:
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
-    sandbox = PathSandbox(cwd=cwd, output_dir=tmp_path / "output", data_dir=tmp_path / "data")
-    policy = PolicyEngine(
-        trusted_mode=trusted_mode,
-        allowed_tools=frozenset(),
-        denied_tools=frozenset(),
-        default_decision=Decision.ALLOW,
-        path_sandbox=sandbox,
-        read_tracker=ReadTracker(),
-    )
-    registry = ToolRegistry(policy, ReadTracker())
-    registry.register(
-        ToolRegistration(
-            definition=ToolDefinition(name="echo_tool", description="d", input_schema={}),
-            handler=_ok_handler,
-        )
-    )
-    return registry
-
-
-def _make_confirmation_registry(tmp_path: Path) -> ToolRegistry:
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
-    sandbox = PathSandbox(cwd=cwd, output_dir=tmp_path / "output", data_dir=tmp_path / "data")
-    policy = PolicyEngine(
-        trusted_mode=False,
-        allowed_tools=frozenset(),
-        denied_tools=frozenset(),
-        default_decision=Decision.ALLOW,
-        path_sandbox=sandbox,
-        read_tracker=ReadTracker(),
-    )
-    registry = ToolRegistry(policy, ReadTracker())
-    registry.register(
-        ToolRegistration(
-            definition=ToolDefinition(name="dangerous_tool", description="d", input_schema={}),
-            handler=_ok_handler,
-            policy_spec=ToolPolicySpec(requires_confirmation=True),
-        )
-    )
-    return registry
-
-
-def _router(model_id: str = "model-x") -> ModelRouter:
-    config = ModelRouterConfig()
-    config.anthropic = ProviderConfig(api_key="key", models={_TIER: model_id})
-    return ModelRouter(config)
-
-
-def _router_with_fallback(
-    *,
-    model_id: str = "model-x",
-    fallback_model_id: str = "model-y",
-    enabled: bool = True,
-) -> ModelRouter:
-    """两个 Provider（anthropic 为主、openai 为备）都配置了同一层级的模型；
-    ``enabled`` 控制 ``enable_cross_provider_fallback`` 开关，默认打开以便测试降级路径，
-    传 ``enabled=False`` 可以复用同一个 helper 测试"开关关闭时不降级"。
-    """
-    config = ModelRouterConfig()
-    config.anthropic = ProviderConfig(api_key="key", models={_TIER: model_id})
-    config.openai = ProviderConfig(api_key="key2", models={_TIER: fallback_model_id})
-    config.enable_cross_provider_fallback = enabled
-    return ModelRouter(config)
-
-
-def _tool_results_by_id(messages: list[Message]) -> dict[str, ToolResultBlock]:
-    return {
-        block.tool_use_id: block
-        for message in messages
-        if isinstance(message.content, list)
-        for block in message.content
-        if isinstance(block, ToolResultBlock)
-    }
+from miku_on_desk.brain.tracing import TRACE_LOGGER_NAME
+from miku_on_desk.config.settings import ModelRouterConfig, ProviderName
+from tests.support.loop_fixtures import (
+    SESSION,
+    TIER,
+    FakeProvider,
+    build_router,
+    build_router_with_fallback,
+    make_confirmation_registry,
+    make_registry,
+    never_confirm,
+    tool_results_by_id,
+    tool_use,
+)
 
 
 async def test_run_ai_loop_returns_done_when_first_response_has_no_tool_calls(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider([StreamResult(success=True, content="全部完成")])
+    provider = FakeProvider([StreamResult(success=True, content="全部完成")])
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="你好")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.DONE
     assert result.rounds == 0
@@ -184,24 +65,24 @@ async def test_run_ai_loop_returns_done_when_first_response_has_no_tool_calls(
 
 
 async def test_run_ai_loop_executes_tool_then_completes(tmp_path: Path) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
             StreamResult(success=True, content="完成"),
         ]
     )
     tool_use_events: list[ToolUseBlock] = []
     tool_result_events: list[ToolResultBlock] = []
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="帮我回声")],
         callbacks=LoopCallbacks(
-            confirm=_never_confirm,
+            confirm=never_confirm,
             on_tool_use=tool_use_events.append,
             on_tool_result=tool_result_events.append,
         ),
@@ -218,21 +99,21 @@ async def test_run_ai_loop_emits_structured_log_fields(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level("DEBUG", logger="miku_on_desk.brain.loop")
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
             StreamResult(success=True, content="完成"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="帮我回声")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.DONE
     messages = [record.getMessage() for record in caplog.records]
@@ -247,24 +128,77 @@ async def test_run_ai_loop_emits_structured_log_fields(
     )
 
 
+async def test_run_ai_loop_emits_trace_events_for_a_full_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """结构化 trace 与上面的人类可读文本日志完全并行——同一次跑动，分别用两种手法各自
+    断言各自的输出，互不干扰、互不派生。"""
+    trace_logger = logging.getLogger(TRACE_LOGGER_NAME)
+    original_propagate = trace_logger.propagate
+    trace_logger.propagate = True
+    caplog.set_level(logging.DEBUG, logger=TRACE_LOGGER_NAME)
+    try:
+        provider = FakeProvider(
+            [
+                StreamResult(
+                    success=True,
+                    tool_uses=[tool_use("1")],
+                    usage=StreamUsage(input_tokens=123, output_tokens=45),
+                ),
+                StreamResult(success=True, content="完成"),
+            ]
+        )
+        result = await run_ai_loop(
+            session_id=SESSION,
+            tier=TIER,
+            router=build_router(),
+            providers={ProviderName.ANTHROPIC: provider},
+            registry=make_registry(tmp_path),
+            system="sys",
+            messages=[Message(role="user", content="帮我回声")],
+            callbacks=LoopCallbacks(confirm=never_confirm),
+        )
+    finally:
+        trace_logger.propagate = original_propagate
+
+    assert result.stop_reason == LoopStopReason.DONE
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == TRACE_LOGGER_NAME
+    ]
+    events_by_type = [event["event"] for event in events]
+    for expected in (
+        "loop_start",
+        "tool_call_start",
+        "tool_call_end",
+        "provider_call",
+        "loop_end",
+    ):
+        assert expected in events_by_type
+
+    provider_call_events = [event for event in events if event["event"] == "provider_call"]
+    assert provider_call_events[0]["input_tokens"] == 123
+
+
 async def test_run_ai_loop_stops_with_budget_exhausted_when_rounds_run_out(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(max_tool_rounds=1),
     )
     assert result.stop_reason == LoopStopReason.BUDGET_EXHAUSTED
@@ -273,18 +207,18 @@ async def test_run_ai_loop_stops_with_budget_exhausted_when_rounds_run_out(
 
 
 async def test_run_ai_loop_returns_provider_error_on_initial_call(tmp_path: Path) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [StreamResult(success=False, error="provider_error", raw_error="boom")]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.PROVIDER_ERROR
     assert result.rounds == 0
@@ -293,21 +227,21 @@ async def test_run_ai_loop_returns_provider_error_on_initial_call(tmp_path: Path
 
 
 async def test_run_ai_loop_returns_provider_error_on_subsequent_call(tmp_path: Path) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
             StreamResult(success=False, error="request_idle_timeout", raw_error="idle"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.PROVIDER_ERROR
     assert result.rounds == 1
@@ -325,31 +259,31 @@ async def test_run_ai_loop_returns_provider_error_on_subsequent_call(tmp_path: P
 async def test_run_ai_loop_translates_timeout_kind_into_actionable_text(
     tmp_path: Path, error_token: str, expected_text: str
 ) -> None:
-    provider = _FakeProvider([StreamResult(success=False, error=error_token, raw_error="raw")])
+    provider = FakeProvider([StreamResult(success=False, error=error_token, raw_error="raw")])
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.error == expected_text
 
 
 async def test_run_ai_loop_leaves_non_timeout_error_tokens_untranslated(tmp_path: Path) -> None:
-    provider = _FakeProvider([StreamResult(success=False, error="rate_limited", raw_error="raw")])
+    provider = FakeProvider([StreamResult(success=False, error="rate_limited", raw_error="raw")])
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.error == "rate_limited"
 
@@ -357,17 +291,17 @@ async def test_run_ai_loop_leaves_non_timeout_error_tokens_untranslated(tmp_path
 async def test_run_ai_loop_falls_back_to_another_provider_when_primary_fails(
     tmp_path: Path,
 ) -> None:
-    primary = _FakeProvider([StreamResult(success=False, error="client_error", raw_error="denied")])
-    fallback = _FakeProvider([StreamResult(success=True, content="来自备用")])
+    primary = FakeProvider([StreamResult(success=False, error="client_error", raw_error="denied")])
+    fallback = FakeProvider([StreamResult(success=True, content="来自备用")])
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router_with_fallback(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router_with_fallback(),
         providers={ProviderName.ANTHROPIC: primary, ProviderName.OPENAI: fallback},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.DONE
     assert result.messages[-1].role == "assistant"
@@ -379,17 +313,17 @@ async def test_run_ai_loop_logs_fallback_trigger_with_session_id(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level("WARNING", logger="miku_on_desk.brain.loop")
-    primary = _FakeProvider([StreamResult(success=False, error="client_error", raw_error="denied")])
-    fallback = _FakeProvider([StreamResult(success=True, content="来自备用")])
+    primary = FakeProvider([StreamResult(success=False, error="client_error", raw_error="denied")])
+    fallback = FakeProvider([StreamResult(success=True, content="来自备用")])
     await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router_with_fallback(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router_with_fallback(),
         providers={ProviderName.ANTHROPIC: primary, ProviderName.OPENAI: fallback},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     messages = [record.getMessage() for record in caplog.records]
     assert any(
@@ -402,21 +336,21 @@ async def test_run_ai_loop_logs_fallback_trigger_with_session_id(
 async def test_run_ai_loop_preserves_original_error_when_fallback_also_fails(
     tmp_path: Path,
 ) -> None:
-    primary = _FakeProvider(
+    primary = FakeProvider(
         [StreamResult(success=False, error="client_error", raw_error="primary-boom")]
     )
-    fallback = _FakeProvider(
+    fallback = FakeProvider(
         [StreamResult(success=False, error="client_error", raw_error="fallback-boom")]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router_with_fallback(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router_with_fallback(),
         providers={ProviderName.ANTHROPIC: primary, ProviderName.OPENAI: fallback},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.PROVIDER_ERROR
     assert result.raw_error == "primary-boom"
@@ -425,19 +359,19 @@ async def test_run_ai_loop_preserves_original_error_when_fallback_also_fails(
 
 
 async def test_run_ai_loop_does_not_fall_back_when_disabled(tmp_path: Path) -> None:
-    primary = _FakeProvider(
+    primary = FakeProvider(
         [StreamResult(success=False, error="client_error", raw_error="primary-boom")]
     )
-    fallback = _FakeProvider([StreamResult(success=True, content="不该被用到")])
+    fallback = FakeProvider([StreamResult(success=True, content="不该被用到")])
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router_with_fallback(enabled=False),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router_with_fallback(enabled=False),
         providers={ProviderName.ANTHROPIC: primary, ProviderName.OPENAI: fallback},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.PROVIDER_ERROR
     assert result.raw_error == "primary-boom"
@@ -447,24 +381,24 @@ async def test_run_ai_loop_does_not_fall_back_when_disabled(tmp_path: Path) -> N
 async def test_run_ai_loop_keeps_using_fallback_provider_for_subsequent_rounds(
     tmp_path: Path,
 ) -> None:
-    primary = _FakeProvider(
+    primary = FakeProvider(
         [StreamResult(success=False, error="client_error", raw_error="primary-boom")]
     )
-    fallback = _FakeProvider(
+    fallback = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
             StreamResult(success=True, content="完成"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router_with_fallback(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router_with_fallback(),
         providers={ProviderName.ANTHROPIC: primary, ProviderName.OPENAI: fallback},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.DONE
     assert result.rounds == 1
@@ -475,17 +409,17 @@ async def test_run_ai_loop_keeps_using_fallback_provider_for_subsequent_rounds(
 async def test_run_ai_loop_returns_no_model_available_when_router_cannot_resolve(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider([])
+    provider = FakeProvider([])
     original_messages = [Message(role="user", content="hi")]
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
+        session_id=SESSION,
+        tier=TIER,
         router=ModelRouter(ModelRouterConfig()),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=original_messages,
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.NO_MODEL_AVAILABLE
     assert result.rounds == 0
@@ -494,24 +428,24 @@ async def test_run_ai_loop_returns_no_model_available_when_router_cannot_resolve
 
 
 async def test_run_ai_loop_feeds_deny_result_back_and_continues(tmp_path: Path) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1", name="unknown_tool")]),
+            StreamResult(success=True, tool_uses=[tool_use("1", name="unknown_tool")]),
             StreamResult(success=True, content="done"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
     )
     assert result.stop_reason == LoopStopReason.DONE
-    tool_results = _tool_results_by_id(result.messages)
+    tool_results = tool_results_by_id(result.messages)
     assert tool_results["1"].is_error is True
     assert "未知工具" in tool_results["1"].content
 
@@ -521,48 +455,49 @@ async def test_run_ai_loop_executes_tool_after_confirm_approves(tmp_path: Path) 
         assert reason == "此操作需要用户确认。"
         return True
 
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1", name="dangerous_tool")]),
+            StreamResult(success=True, tool_uses=[tool_use("1", name="dangerous_tool")]),
             StreamResult(success=True, content="done"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_confirmation_registry(tmp_path),
+        registry=make_confirmation_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
         callbacks=LoopCallbacks(confirm=_approve),
     )
-    tool_results = _tool_results_by_id(result.messages)
+    tool_results = tool_results_by_id(result.messages)
     assert tool_results["1"].is_error is False
-    assert tool_results["1"].content == "ok"
+    assert tool_results["1"].content.startswith("ok")
+    assert "[verify-before-done]" in tool_results["1"].content
 
 
 async def test_run_ai_loop_records_error_result_when_confirm_rejects(tmp_path: Path) -> None:
     async def _reject(_tool_use: ToolUseBlock, _reason: str | None) -> bool:
         return False
 
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1", name="dangerous_tool")]),
+            StreamResult(success=True, tool_uses=[tool_use("1", name="dangerous_tool")]),
             StreamResult(success=True, content="done"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_confirmation_registry(tmp_path),
+        registry=make_confirmation_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
         callbacks=LoopCallbacks(confirm=_reject),
     )
-    tool_results = _tool_results_by_id(result.messages)
+    tool_results = tool_results_by_id(result.messages)
     assert tool_results["1"].is_error is True
     assert "拒绝" in tool_results["1"].content
 
@@ -570,23 +505,23 @@ async def test_run_ai_loop_records_error_result_when_confirm_rejects(tmp_path: P
 async def test_budget_warning_attached_to_previous_tool_result_when_threshold_crossed(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
-            StreamResult(success=True, tool_uses=[_tool_use("3")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("3")]),
             StreamResult(success=True, content="done"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(
             max_tool_rounds=4, budget_caution_remaining=2, budget_critical_remaining=1
         ),
@@ -609,25 +544,25 @@ async def test_budget_warning_attached_to_previous_tool_result_when_threshold_cr
 async def test_budget_warning_escalates_and_does_not_repeat_for_same_tier(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
-            StreamResult(success=True, tool_uses=[_tool_use("3")]),
-            StreamResult(success=True, tool_uses=[_tool_use("4")]),
-            StreamResult(success=True, tool_uses=[_tool_use("5")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("3")]),
+            StreamResult(success=True, tool_uses=[tool_use("4")]),
+            StreamResult(success=True, tool_uses=[tool_use("5")]),
             StreamResult(success=True, content="done"),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(
             max_tool_rounds=5, budget_caution_remaining=3, budget_critical_remaining=1
         ),
@@ -635,34 +570,34 @@ async def test_budget_warning_escalates_and_does_not_repeat_for_same_tier(
     assert result.stop_reason == LoopStopReason.DONE
     assert result.rounds == 5
 
-    tool_results = _tool_results_by_id(result.messages)
+    tool_results = tool_results_by_id(result.messages)
     assert tool_results["1"].content.count("[turn-budget]") == 0
     assert tool_results["2"].content.count("[turn-budget]") == 1
-    assert "最后一轮" not in tool_results["2"].content
+    assert "如实告知" not in tool_results["2"].content
     assert tool_results["3"].content.count("[turn-budget]") == 0
     assert tool_results["4"].content.count("[turn-budget]") == 1
-    assert "最后一轮" in tool_results["4"].content
+    assert "如实告知" in tool_results["4"].content
     assert tool_results["5"].content.count("[turn-budget]") == 0
 
 
 async def test_budget_warning_silently_skipped_when_no_tool_result_exists_yet(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
         ]
     )
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(max_tool_rounds=1, budget_critical_remaining=5),
     )
     assert result.stop_reason == LoopStopReason.BUDGET_EXHAUSTED
@@ -671,21 +606,21 @@ async def test_budget_warning_silently_skipped_when_no_tool_result_exists_yet(
 async def test_run_ai_loop_stops_with_time_exhausted_and_preserves_partial_messages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = _FakeProvider(
-        [StreamResult(success=True, content="部分内容", tool_uses=[_tool_use("1")])]
+    provider = FakeProvider(
+        [StreamResult(success=True, content="部分内容", tool_uses=[tool_use("1")])]
     )
     monotonic_values = iter([0.0, 100.0])
     monkeypatch.setattr(loop_module, "monotonic", lambda: next(monotonic_values))
 
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(deadline_s=10.0),
     )
 
@@ -703,11 +638,11 @@ async def test_run_ai_loop_stops_with_time_exhausted_and_preserves_partial_messa
 async def test_time_warning_attached_to_previous_tool_result_when_threshold_crossed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
-            StreamResult(success=True, tool_uses=[_tool_use("3")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("3")]),
             StreamResult(success=True, content="done"),
         ]
     )
@@ -715,14 +650,14 @@ async def test_time_warning_attached_to_previous_tool_result_when_threshold_cros
     monkeypatch.setattr(loop_module, "monotonic", lambda: next(monotonic_values))
 
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(
             deadline_s=100.0, time_caution_remaining_s=50.0, time_critical_remaining_s=10.0
         ),
@@ -745,13 +680,13 @@ async def test_time_warning_attached_to_previous_tool_result_when_threshold_cros
 async def test_time_warning_escalates_and_does_not_repeat_for_same_tier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
-            StreamResult(success=True, tool_uses=[_tool_use("3")]),
-            StreamResult(success=True, tool_uses=[_tool_use("4")]),
-            StreamResult(success=True, tool_uses=[_tool_use("5")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("3")]),
+            StreamResult(success=True, tool_uses=[tool_use("4")]),
+            StreamResult(success=True, tool_uses=[tool_use("5")]),
             StreamResult(success=True, content="done"),
         ]
     )
@@ -759,14 +694,14 @@ async def test_time_warning_escalates_and_does_not_repeat_for_same_tier(
     monkeypatch.setattr(loop_module, "monotonic", lambda: next(monotonic_values))
 
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(
             deadline_s=6.0, time_caution_remaining_s=3.0, time_critical_remaining_s=1.0
         ),
@@ -774,23 +709,23 @@ async def test_time_warning_escalates_and_does_not_repeat_for_same_tier(
     assert result.stop_reason == LoopStopReason.DONE
     assert result.rounds == 5
 
-    tool_results = _tool_results_by_id(result.messages)
+    tool_results = tool_results_by_id(result.messages)
     assert tool_results["1"].content.count("[time-budget]") == 0
     assert tool_results["2"].content.count("[time-budget]") == 1
-    assert "最后一轮" not in tool_results["2"].content
+    assert "如实告知" not in tool_results["2"].content
     assert tool_results["3"].content.count("[time-budget]") == 0
     assert tool_results["4"].content.count("[time-budget]") == 1
-    assert "最后一轮" in tool_results["4"].content
+    assert "如实告知" in tool_results["4"].content
     assert tool_results["5"].content.count("[time-budget]") == 0
 
 
 async def test_compact_context_not_invoked_on_first_iteration_but_invoked_afterward(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
             StreamResult(success=True, content="done"),
         ]
     )
@@ -801,14 +736,14 @@ async def test_compact_context_not_invoked_on_first_iteration_but_invoked_afterw
         return None
 
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm, compact_context=_compact),
+        callbacks=LoopCallbacks(confirm=never_confirm, compact_context=_compact),
     )
     assert result.stop_reason == LoopStopReason.DONE
     assert len(compact_calls) == 1
@@ -817,10 +752,10 @@ async def test_compact_context_not_invoked_on_first_iteration_but_invoked_afterw
 async def test_compact_context_replaces_working_messages_when_it_returns_a_value(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
-            StreamResult(success=True, tool_uses=[_tool_use("2")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("2")]),
             StreamResult(success=True, content="done"),
         ]
     )
@@ -829,14 +764,14 @@ async def test_compact_context_replaces_working_messages_when_it_returns_a_value
         return [Message(role="user", content="压缩后的摘要")]
 
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm, compact_context=_compact),
+        callbacks=LoopCallbacks(confirm=never_confirm, compact_context=_compact),
     )
     assert result.stop_reason == LoopStopReason.DONE
     round_b_messages = provider.calls[2]["messages"]
@@ -846,9 +781,9 @@ async def test_compact_context_replaces_working_messages_when_it_returns_a_value
 async def test_consume_queued_message_injects_user_message_and_notifies(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider(
+    provider = FakeProvider(
         [
-            StreamResult(success=True, tool_uses=[_tool_use("1")]),
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
             StreamResult(success=True, content="done"),
         ]
     )
@@ -860,15 +795,15 @@ async def test_consume_queued_message_injects_user_message_and_notifies(
         return pending.pop(0)
 
     result = await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
         callbacks=LoopCallbacks(
-            confirm=_never_confirm,
+            confirm=never_confirm,
             consume_queued_message=_consume,
             on_queued_message_injected=injected.append,
         ),
@@ -882,19 +817,19 @@ async def test_consume_queued_message_injects_user_message_and_notifies(
 async def test_on_content_and_on_thinking_are_forwarded_to_provider_stream(
     tmp_path: Path,
 ) -> None:
-    provider = _FakeProvider([StreamResult(success=True, content="ok")])
+    provider = FakeProvider([StreamResult(success=True, content="ok")])
     content_chunks: list[str] = []
     thinking_chunks: list[str] = []
     await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
         callbacks=LoopCallbacks(
-            confirm=_never_confirm,
+            confirm=never_confirm,
             on_content=content_chunks.append,
             on_thinking=thinking_chunks.append,
         ),
@@ -904,17 +839,109 @@ async def test_on_content_and_on_thinking_are_forwarded_to_provider_stream(
 
 
 async def test_run_ai_loop_passes_timeout_config_to_provider(tmp_path: Path) -> None:
-    provider = _FakeProvider([StreamResult(success=True, content="ok")])
+    provider = FakeProvider([StreamResult(success=True, content="ok")])
     await run_ai_loop(
-        session_id=_SESSION,
-        tier=_TIER,
-        router=_router(),
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
         providers={ProviderName.ANTHROPIC: provider},
-        registry=_make_registry(tmp_path),
+        registry=make_registry(tmp_path),
         system="sys",
         messages=[Message(role="user", content="hi")],
-        callbacks=LoopCallbacks(confirm=_never_confirm),
+        callbacks=LoopCallbacks(confirm=never_confirm),
         config=LoopConfig(idle_timeout_s=5.0, hard_timeout_s=30.0),
     )
     assert provider.calls[0]["idle_timeout_s"] == 5.0
     assert provider.calls[0]["hard_timeout_s"] == 30.0
+
+
+async def test_run_ai_loop_appends_verify_before_done_reminder_after_confirmed_tool(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    async def _approve(_tool_use: ToolUseBlock, _reason: str | None) -> bool:
+        return True
+
+    confirmed_provider = FakeProvider(
+        [
+            StreamResult(success=True, tool_uses=[tool_use("1", name="dangerous_tool")]),
+            StreamResult(success=True, content="done"),
+        ]
+    )
+    confirmed_result = await run_ai_loop(
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
+        providers={ProviderName.ANTHROPIC: confirmed_provider},
+        registry=make_confirmation_registry(tmp_path_factory.mktemp("confirmed")),
+        system="sys",
+        messages=[Message(role="user", content="hi")],
+        callbacks=LoopCallbacks(confirm=_approve),
+    )
+    confirmed_results = tool_results_by_id(confirmed_result.messages)
+    assert "[verify-before-done]" in confirmed_results["1"].content
+
+    plain_provider = FakeProvider(
+        [
+            StreamResult(success=True, tool_uses=[tool_use("1")]),
+            StreamResult(success=True, content="done"),
+        ]
+    )
+    plain_result = await run_ai_loop(
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
+        providers={ProviderName.ANTHROPIC: plain_provider},
+        registry=make_registry(tmp_path_factory.mktemp("plain")),
+        system="sys",
+        messages=[Message(role="user", content="hi")],
+        callbacks=LoopCallbacks(confirm=never_confirm),
+    )
+    plain_results = tool_results_by_id(plain_result.messages)
+    assert "[verify-before-done]" not in plain_results["1"].content
+
+
+async def test_run_ai_loop_progress_checkin_fires_every_n_rounds_and_not_more(
+    tmp_path: Path,
+) -> None:
+    scripted = [
+        StreamResult(success=True, tool_uses=[tool_use(str(i))]) for i in range(1, 18)
+    ]
+    provider = FakeProvider([*scripted, StreamResult(success=True, content="done")])
+    result = await run_ai_loop(
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
+        providers={ProviderName.ANTHROPIC: provider},
+        registry=make_registry(tmp_path),
+        system="sys",
+        messages=[Message(role="user", content="做一件需要很多步骤的事")],
+        callbacks=LoopCallbacks(confirm=never_confirm),
+        config=LoopConfig(max_tool_rounds=20, checkin_every_n_rounds=8),
+    )
+    assert result.stop_reason == LoopStopReason.DONE
+    tool_results = tool_results_by_id(result.messages)
+    checkin_ids = {
+        tool_use_id
+        for tool_use_id, block in tool_results.items()
+        if "[progress-checkin]" in block.content
+    }
+    assert checkin_ids == {"8", "16"}
+
+
+async def test_run_ai_loop_progress_checkin_disabled_when_none(tmp_path: Path) -> None:
+    scripted = [StreamResult(success=True, tool_uses=[tool_use(str(i))]) for i in range(1, 11)]
+    provider = FakeProvider([*scripted, StreamResult(success=True, content="done")])
+    result = await run_ai_loop(
+        session_id=SESSION,
+        tier=TIER,
+        router=build_router(),
+        providers={ProviderName.ANTHROPIC: provider},
+        registry=make_registry(tmp_path),
+        system="sys",
+        messages=[Message(role="user", content="做一件需要很多步骤的事")],
+        callbacks=LoopCallbacks(confirm=never_confirm),
+        config=LoopConfig(max_tool_rounds=15, checkin_every_n_rounds=None),
+    )
+    assert result.stop_reason == LoopStopReason.DONE
+    tool_results = tool_results_by_id(result.messages)
+    assert not any("[progress-checkin]" in block.content for block in tool_results.values())

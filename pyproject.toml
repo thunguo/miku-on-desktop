@@ -100,3 +100,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "eval_regression: 从真实生产失败转化出的具体回归 case，必须始终为绿",
+    "eval_capability: 验证某类 agent 行为准则的正向能力用例",
+    "eval_llm_judge: 依赖真实 LLM 调用打分，无 API key 时显式 skip",
+]
