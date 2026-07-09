@@ -2,8 +2,10 @@
 
 用 ``QThread`` 子类而非裸 ``threading.Thread``：子类自带的 ``Signal`` 天然获得
 ``BrainEventBus`` 依赖的同款跨线程 ``QueuedConnection`` 编组，比额外包一层 ``QObject``
-总线更省代码。取消用 ``threading.Event``，只在 `generate_character` 内部约 11 次阻塞
-HTTP 调用之间检查（不在调用中途打断）——每次调用耗时 10-30 秒，不要求硬实时。
+总线更省代码。取消用 ``threading.Event``：参考图这次阻塞调用之后、以及各状态动作条阶段
+每提交/完成一个就检查一次——`generate_character` 内部把动作条阶段改成了并发（最多几路
+同时请求），取消依然不打断已经在飞的调用，只是不再等它、不再排新的；每次调用耗时
+10-30 秒，不要求硬实时。
 """
 
 from __future__ import annotations

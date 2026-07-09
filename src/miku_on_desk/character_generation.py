@@ -18,6 +18,7 @@ import base64
 import io
 from collections import deque
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -241,6 +242,11 @@ STATE_SPECS: tuple[StatePromptSpec, ...] = (
     ),
 )
 
+# 各状态的动作条互不依赖（都只读同一张已生成好的参考图），可以并发请求；上限选得比较保守，
+# 一是避免对用户自填的第三方中转 base_url 造成不可预期的速率压力，二是给"取消"留响应空间——
+# 如果一次性把 10 个请求全发出去，用户点取消时早就全都在飞了，取消形同虚设。
+_MAX_CONCURRENT_STRIP_REQUESTS = 4
+
 
 def _decode_first_image(response: ImagesResponse | str) -> Image.Image:
     if isinstance(response, str):
@@ -328,6 +334,25 @@ def generate_state_strip(
         output_format="png",
     )
     return _decode_first_image(response)
+
+
+
+def _generate_strip_for_spec(
+    client: OpenAI,
+    config: GenerationConfig,
+    reference: Image.Image,
+    raw_dir: Path,
+    spec: StatePromptSpec,
+) -> Image.Image:
+    """并发调度里单个状态的完整处理单元：请求 → 落盘原图 → 后处理成定长帧条。"""
+    raw_strip = generate_state_strip(client, config, reference, spec)
+    raw_strip.save(raw_dir / f"{spec.state.value}.png")
+    return postprocess_strip(
+        raw_strip,
+        frame_count=spec.frame_count,
+        frame_width=config.frame_width,
+        frame_height=config.frame_height,
+    )
 
 
 def _flood_fill_from_border(mask: np.ndarray) -> np.ndarray:
@@ -546,13 +571,71 @@ class GenerationCancelled(Exception):
     """用户在生成过程中取消。"""
 
 
+def _generate_all_strips(
+    client: OpenAI,
+    config: GenerationConfig,
+    reference: Image.Image,
+    raw_dir: Path,
+    on_progress: Callable[[GenerationProgress], None],
+    should_cancel: Callable[[], bool],
+) -> list[Image.Image]:
+    """并发跑完 `STATE_SPECS` 里所有状态的动作条：它们都只依赖同一张已生成好的 `reference`，
+    互不依赖，因此可以一起发出去，把总耗时从"逐个调用耗时之和"降到"一批里最慢那个的耗时"。
+
+    完成顺序（`as_completed` 的产出顺序）可能与 `STATE_SPECS` 顺序不同，这里按 spec 原始
+    下标回填结果，保证返回值顺序仍与 `STATE_SPECS` 一一对应——`assemble_spritesheet` 依赖
+    这个顺序来摆行。`on_progress` 里的 `strip` 事件用 `detail`（该状态自己的名字）标识"这
+    次完成的是谁"，调用方不应假设它等于 `completed_states` 对应的下标。
+    """
+    results: dict[int, Image.Image] = {}
+    completed_count = 0
+
+    with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_STRIP_REQUESTS) as executor:
+        future_to_spec: dict[Future[Image.Image], tuple[int, StatePromptSpec]] = {}
+        for index, spec in enumerate(STATE_SPECS):
+            if should_cancel():
+                break
+            future = executor.submit(
+                _generate_strip_for_spec, client, config, reference, raw_dir, spec
+            )
+            future_to_spec[future] = (index, spec)
+
+        try:
+            for future in as_completed(future_to_spec):
+                index, spec = future_to_spec[future]
+                processed = future.result()
+                results[index] = processed
+                completed_count += 1
+                on_progress(
+                    GenerationProgress(
+                        "strip",
+                        spec.state.value,
+                        completed_count,
+                        len(STATE_SPECS),
+                        strip_image=processed,
+                    )
+                )
+                if should_cancel():
+                    break
+        finally:
+            # 对已完成/已在跑的 future 是 no-op；只掐掉还没开始跑的排队请求——
+            # 不打断正在飞的调用，只是不再等它、不再排新的。
+            for pending_future in future_to_spec:
+                pending_future.cancel()
+
+    if should_cancel():
+        raise GenerationCancelled()
+
+    return [results[index] for index in range(len(STATE_SPECS))]
+
+
 def generate_character(
     config: GenerationConfig,
     *,
     on_progress: Callable[[GenerationProgress], None] = lambda _progress: None,
     should_cancel: Callable[[], bool] = lambda: False,
 ) -> tuple[Image.Image, SpriteSheetMeta, list[str]]:
-    """CLI 与 GUI 共享的完整生成流水线：参考图 → 逐状态动作条 → 拼装 → QA。"""
+    """CLI 与 GUI 共享的完整生成流水线：参考图 → 并发生成各状态动作条 → 拼装 → QA。"""
     client = OpenAI(api_key=config.api_key, base_url=config.base_url or None)
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -566,24 +649,7 @@ def generate_character(
     raw_dir = config.output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    strips = []
-    for index, spec in enumerate(STATE_SPECS):
-        if should_cancel():
-            raise GenerationCancelled()
-        raw_strip = generate_state_strip(client, config, reference, spec)
-        raw_strip.save(raw_dir / f"{spec.state.value}.png")
-        processed = postprocess_strip(
-            raw_strip,
-            frame_count=spec.frame_count,
-            frame_width=config.frame_width,
-            frame_height=config.frame_height,
-        )
-        strips.append(processed)
-        on_progress(
-            GenerationProgress(
-                "strip", spec.state.value, index + 1, len(STATE_SPECS), strip_image=processed
-            )
-        )
+    strips = _generate_all_strips(client, config, reference, raw_dir, on_progress, should_cancel)
 
     on_progress(GenerationProgress("assemble", "", len(STATE_SPECS), len(STATE_SPECS)))
     sheet, meta = assemble_spritesheet(strips, STATE_SPECS, config)
