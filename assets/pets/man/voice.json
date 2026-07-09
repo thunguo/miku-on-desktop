@@ -1,0 +1,7 @@
+{
+  "provider": "elevenlabs",
+  "voice": "QjVXRbtlgRJrkzGhSjSJ",
+  "model": "tts-1",
+  "rate": "+0%",
+  "volume": "+0%"
+}

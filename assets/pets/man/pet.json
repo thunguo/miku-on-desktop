@@ -1,0 +1,70 @@
+{
+  "pet_name": "man",
+  "frame_width": 128,
+  "frame_height": 128,
+  "columns": 8,
+  "rows": 10,
+  "fallback_state": "idle",
+  "states": {
+    "idle": {
+      "row": 0,
+      "frame_count": 6,
+      "fps": 6.0,
+      "loop": true
+    },
+    "talking": {
+      "row": 1,
+      "frame_count": 8,
+      "fps": 10.0,
+      "loop": true
+    },
+    "thinking": {
+      "row": 2,
+      "frame_count": 6,
+      "fps": 5.0,
+      "loop": true
+    },
+    "tool_running": {
+      "row": 3,
+      "frame_count": 8,
+      "fps": 8.0,
+      "loop": true
+    },
+    "confirmation_pending": {
+      "row": 4,
+      "frame_count": 4,
+      "fps": 3.0,
+      "loop": true
+    },
+    "dragged": {
+      "row": 5,
+      "frame_count": 2,
+      "fps": 4.0,
+      "loop": true
+    },
+    "success": {
+      "row": 6,
+      "frame_count": 6,
+      "fps": 10.0,
+      "loop": false
+    },
+    "error": {
+      "row": 7,
+      "frame_count": 6,
+      "fps": 10.0,
+      "loop": false
+    },
+    "clicked": {
+      "row": 8,
+      "frame_count": 4,
+      "fps": 12.0,
+      "loop": false
+    },
+    "notice": {
+      "row": 9,
+      "frame_count": 4,
+      "fps": 8.0,
+      "loop": false
+    }
+  }
+}
