@@ -26,6 +26,7 @@ from miku_on_desk.bridge.events import (
     AcpChunkReceived,
     BrainCrashed,
     BrainEventBus,
+    BrainRestarting,
     CancellationGate,
     ConfirmationGate,
     ConfirmationRequested,
@@ -543,6 +544,16 @@ def test_loop_finished_after_confirmation_requested_clears_stale_confirmation_bu
 
     assert window._bubble.is_awaiting_confirmation() is False
     assert window._pending_confirmation_request_id is None
+
+
+def test_brain_restarting_shows_transient_notice(qapp: QApplication, tmp_path: Path) -> None:
+    bus = BrainEventBus()
+    window = _make_window(tmp_path, event_bus=bus)
+
+    bus.emit_event(BrainRestarting(attempt=1, max_attempts=3, delay_s=1.5, error="炸了"))
+
+    assert window._state_machine.current_state(window._elapsed()) == PetState.NOTICE
+    assert "1/3" in window._bubble.current_text()
 
 
 def test_brain_crashed_sets_error_baseline_and_shows_message(

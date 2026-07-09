@@ -165,6 +165,18 @@ class LoopBehaviorConfig(BaseModel):
     time_critical_remaining_s: float = 20.0
 
 
+class BrainResilienceConfig(BaseModel):
+    """Brain 线程崩溃后的自动重启策略。默认开启，把偶发异常转换成短暂重启，而不是需要
+    用户手动重启整个应用；但短时间内反复崩溃（"崩溃循环"）说明问题是持续性的，放弃重试
+    并报告 ``BrainCrashed``，不无限重试掩盖真正的 bug。"""
+
+    enabled: bool = True
+    max_restart_attempts: int = 5
+    base_delay_s: float = 1.0
+    max_delay_s: float = 30.0
+    stable_run_threshold_s: float = 60.0
+
+
 class MemoryTuningConfig(BaseModel):
     """记忆检索/整理/屏幕匹配相关阈值，默认值与原硬编码常量一致。
 
@@ -325,6 +337,7 @@ class AppSettings(BaseModel):
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     long_tasks: LongTaskConfig = Field(default_factory=LongTaskConfig)
     loop_behavior: LoopBehaviorConfig = Field(default_factory=LoopBehaviorConfig)
+    brain_resilience: BrainResilienceConfig = Field(default_factory=BrainResilienceConfig)
     memory_tuning: MemoryTuningConfig = Field(default_factory=MemoryTuningConfig)
     computer_use: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)

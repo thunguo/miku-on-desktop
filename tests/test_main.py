@@ -22,6 +22,7 @@ from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
 from miku_on_desk.bridge.events import (
     BrainCrashed,
     BrainEventBus,
+    BrainRestarting,
     CancellationGate,
     ConfirmationGate,
     QueuedMessageQueue,
@@ -29,6 +30,7 @@ from miku_on_desk.bridge.events import (
 from miku_on_desk.config.settings import (
     AgentProfileConfig,
     AppSettings,
+    BrainResilienceConfig,
     EnvBootstrap,
     ModelTier,
     PersonaConfig,
@@ -315,7 +317,7 @@ def test_run_brain_thread_emits_brain_crashed_when_brain_main_raises(
         thread = threading.Thread(
             target=_run_brain_thread,
             kwargs={
-                "settings": Mock(),
+                "settings": Mock(brain_resilience=BrainResilienceConfig(enabled=False)),
                 "bootstrap": Mock(),
                 "event_bus": bus,
                 "confirm_gate": ConfirmationGate(bus),
@@ -332,6 +334,130 @@ def test_run_brain_thread_emits_brain_crashed_when_brain_main_raises(
     qapp.processEvents()
 
     assert captured == [BrainCrashed(error="炸了")]
+
+
+
+def test_run_brain_thread_restarts_after_transient_crash_and_recovers(
+    qapp: QApplication,
+) -> None:
+    bus = BrainEventBus()
+    captured: list[object] = []
+    bus.brain_event.connect(captured.append)
+    resilience = BrainResilienceConfig(
+        enabled=True, max_restart_attempts=3, base_delay_s=0.0, max_delay_s=0.0
+    )
+
+    with patch(
+        "miku_on_desk.main._brain_main",
+        side_effect=[RuntimeError("A"), None],
+    ):
+        thread = threading.Thread(
+            target=_run_brain_thread,
+            kwargs={
+                "settings": Mock(brain_resilience=resilience),
+                "bootstrap": Mock(),
+                "event_bus": bus,
+                "confirm_gate": ConfirmationGate(bus),
+                "cancellation_gate": CancellationGate(),
+                "message_queue": QueuedMessageQueue(),
+                "chat_input": queue.Queue(),
+                "session_id": "s1",
+                "memory_system": Mock(),
+                "sleep": lambda _seconds: None,
+            },
+        )
+        thread.start()
+        thread.join(timeout=5.0)
+
+    qapp.processEvents()
+
+    assert captured == [BrainRestarting(attempt=1, max_attempts=3, delay_s=0.0, error="A")]
+
+
+def test_run_brain_thread_gives_up_after_exhausting_restart_budget(
+    qapp: QApplication,
+) -> None:
+    bus = BrainEventBus()
+    captured: list[object] = []
+    bus.brain_event.connect(captured.append)
+    resilience = BrainResilienceConfig(
+        enabled=True, max_restart_attempts=3, base_delay_s=0.0, max_delay_s=0.0
+    )
+
+    with patch(
+        "miku_on_desk.main._brain_main", side_effect=RuntimeError("持续崩溃")
+    ):
+        thread = threading.Thread(
+            target=_run_brain_thread,
+            kwargs={
+                "settings": Mock(brain_resilience=resilience),
+                "bootstrap": Mock(),
+                "event_bus": bus,
+                "confirm_gate": ConfirmationGate(bus),
+                "cancellation_gate": CancellationGate(),
+                "message_queue": QueuedMessageQueue(),
+                "chat_input": queue.Queue(),
+                "session_id": "s1",
+                "memory_system": Mock(),
+                "sleep": lambda _seconds: None,
+            },
+        )
+        thread.start()
+        thread.join(timeout=5.0)
+
+    qapp.processEvents()
+
+    assert captured == [
+        BrainRestarting(attempt=1, max_attempts=3, delay_s=0.0, error="持续崩溃"),
+        BrainRestarting(attempt=2, max_attempts=3, delay_s=0.0, error="持续崩溃"),
+        BrainCrashed(error="持续崩溃", attempts=3),
+    ]
+
+
+def test_run_brain_thread_resets_restart_budget_after_stable_run(
+    qapp: QApplication,
+) -> None:
+    bus = BrainEventBus()
+    captured: list[object] = []
+    bus.brain_event.connect(captured.append)
+    resilience = BrainResilienceConfig(
+        enabled=True,
+        max_restart_attempts=2,
+        base_delay_s=0.0,
+        max_delay_s=0.0,
+        stable_run_threshold_s=60.0,
+    )
+    monotonic_values = iter([0.0, 1.0, 2.0, 100.0, 101.0, 102.0])
+
+    with patch(
+        "miku_on_desk.main._brain_main", side_effect=RuntimeError("崩溃")
+    ):
+        thread = threading.Thread(
+            target=_run_brain_thread,
+            kwargs={
+                "settings": Mock(brain_resilience=resilience),
+                "bootstrap": Mock(),
+                "event_bus": bus,
+                "confirm_gate": ConfirmationGate(bus),
+                "cancellation_gate": CancellationGate(),
+                "message_queue": QueuedMessageQueue(),
+                "chat_input": queue.Queue(),
+                "session_id": "s1",
+                "memory_system": Mock(),
+                "sleep": lambda _seconds: None,
+                "monotonic": lambda: next(monotonic_values),
+            },
+        )
+        thread.start()
+        thread.join(timeout=5.0)
+
+    qapp.processEvents()
+
+    assert captured == [
+        BrainRestarting(attempt=1, max_attempts=2, delay_s=0.0, error="崩溃"),
+        BrainRestarting(attempt=1, max_attempts=2, delay_s=0.0, error="崩溃"),
+        BrainCrashed(error="崩溃", attempts=2),
+    ]
 
 
 def test_open_memory_panel_reuses_passed_in_memory_system_instance(

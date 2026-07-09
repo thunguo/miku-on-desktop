@@ -50,6 +50,10 @@ class ToolRegistry:
     def definitions(self) -> list[ToolDefinition]:
         return [reg.definition for reg in self._tools.values()]
 
+    def policy_spec_for(self, name: str) -> ToolPolicySpec | None:
+        registration = self._tools.get(name)
+        return registration.policy_spec if registration is not None else None
+
     def subset(self, names: Iterable[str], *, exclude: Iterable[str] = ()) -> ToolRegistry:
         """返回一个共享同一个 policy/read_tracker 的新 registry，只暴露 names 里列出的工具；
         names 为空表示"当前已注册的全部工具"（对应子 agent 白名单的"允许全部"语义）。

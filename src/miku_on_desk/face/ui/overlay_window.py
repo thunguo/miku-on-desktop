@@ -26,6 +26,7 @@ from miku_on_desk.bridge.events import (
     BrainCrashed,
     BrainEvent,
     BrainEventBus,
+    BrainRestarting,
     CancellationGate,
     ConfirmationGate,
     ConfirmationRequested,
@@ -365,6 +366,13 @@ class OverlayWindow(QWidget):
             self._stop_button.hide()
             self._stop_button.setEnabled(True)
             self._clear_pending_click_target()
+        elif isinstance(event, BrainRestarting):
+            self._state_machine.trigger_transient(PetState.NOTICE, t=t)
+            self._bubble.show_speech(
+                f"呀，内部出了点小问题，正在自动恢复中……"
+                f"（第 {event.attempt}/{event.max_attempts} 次尝试）"
+            )
+            self._reflow_bubble()
         elif isinstance(event, BrainCrashed):
             self._acp_active_agent = None
             if self._speech_controller is not None:

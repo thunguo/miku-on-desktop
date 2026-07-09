@@ -26,6 +26,7 @@ from miku_on_desk.brain.providers.base import (
 from miku_on_desk.bridge.events import (
     BrainCrashed,
     BrainEventBus,
+    BrainRestarting,
     CancellationGate,
     ConfirmationGate,
     ConfirmationRequested,
@@ -168,6 +169,15 @@ def test_emit_event_delivers_brain_crashed() -> None:
     bus.emit_event(BrainCrashed(error="炸了"))
 
     assert captured == [BrainCrashed(error="炸了")]
+
+
+
+def test_emit_event_delivers_brain_restarting() -> None:
+    bus, captured = _make_bus_with_capture()
+
+    bus.emit_event(BrainRestarting(attempt=1, max_attempts=3, delay_s=1.5, error="炸了"))
+
+    assert captured == [BrainRestarting(attempt=1, max_attempts=3, delay_s=1.5, error="炸了")]
 
 
 async def test_confirmation_gate_round_trip_returns_approval() -> None:
