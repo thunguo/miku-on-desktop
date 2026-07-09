@@ -920,6 +920,7 @@ dependencies = [
     { name = "python-frontmatter" },
     { name = "pyyaml" },
     { name = "watchfiles" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -968,6 +969,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "uiautomation", marker = "sys_platform == 'win32' and extra == 'windows'", specifier = ">=2.0.29" },
     { name = "watchfiles", specifier = ">=1.2" },
+    { name = "websockets", specifier = ">=16.0" },
 ]
 provides-extras = ["windows", "macos"]
 

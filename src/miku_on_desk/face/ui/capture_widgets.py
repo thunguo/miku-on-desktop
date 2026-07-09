@@ -87,13 +87,13 @@ def _default_request_camera_permission(callback: Callable[[Qt.PermissionStatus],
     app.requestPermission(QCameraPermission(), app, relay.on_result)
 
 
-def _default_check_microphone_permission() -> Qt.PermissionStatus:
+def default_check_microphone_permission() -> Qt.PermissionStatus:
     app = QCoreApplication.instance()
     assert app is not None
     return app.checkPermission(QMicrophonePermission())
 
 
-def _default_request_microphone_permission(
+def default_request_microphone_permission(
     callback: Callable[[Qt.PermissionStatus], None],
 ) -> None:
     app = QCoreApplication.instance()
@@ -218,8 +218,8 @@ class AudioRecorderWidget(QWidget):
         request_permission: Callable[[Callable[[Qt.PermissionStatus], None]], None] | None = None,
     ) -> None:
         super().__init__(parent)
-        self._check_permission = check_permission or _default_check_microphone_permission
-        self._request_permission = request_permission or _default_request_microphone_permission
+        self._check_permission = check_permission or default_check_microphone_permission
+        self._request_permission = request_permission or default_request_microphone_permission
         self._audio_input: QAudioInput | None = None
         self._capture_session: QMediaCaptureSession | None = None
         self._recorder: QMediaRecorder | None = None

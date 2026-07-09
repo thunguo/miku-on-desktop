@@ -44,6 +44,8 @@ from miku_on_desk.face.hooks.schema import HookEvent, TransitionKind, resolve_tr
 from miku_on_desk.face.pet_motion import PetTargetWalker, PetWalker, compute_stand_position
 from miku_on_desk.face.pet_state import PetState, PetStateMachine
 from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, frame_index
+from miku_on_desk.face.stt_worker import SttWorker
+from miku_on_desk.face.ui.audio_capture import PcmAudioCapture
 from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.radial_menu import RadialMenu
 from miku_on_desk.face.ui.speech_bubble import SpeechBubble
@@ -138,6 +140,8 @@ class OverlayWindow(QWidget):
         confirm_yes_shortcut: str = "Ctrl+Shift+Y",
         confirm_no_shortcut: str = "Ctrl+Shift+N",
         speech_controller: SpeechController | None = None,
+        voice_capture: PcmAudioCapture | None = None,
+        stt_worker: SttWorker | None = None,
     ) -> None:
         super().__init__()
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
@@ -200,6 +204,8 @@ class OverlayWindow(QWidget):
 
         self._confirmation_gate = confirmation_gate
         self._speech_controller = speech_controller
+        self._voice_capture = voice_capture
+        self._stt_worker = stt_worker
         self._pending_confirmation_request_id: str | None = None
         self._tool_use_names: dict[str, str] = {}
         self._acp_active_agent: str | None = None
@@ -492,6 +498,15 @@ class OverlayWindow(QWidget):
         """
         self._speech_controller = speech_controller
 
+    def set_voice_input(
+        self, voice_capture: PcmAudioCapture | None, stt_worker: SttWorker | None
+    ) -> None:
+        """跟 ``set_speech_controller`` 同理：设置保存后语音输入配置热重载时同步，下一次
+        ``_show_chat_popup`` 构造的新 ``ChatPopup`` 会拿到最新值。
+        """
+        self._voice_capture = voice_capture
+        self._stt_worker = stt_worker
+
     def _on_stop_clicked(self) -> None:
         if self._cancellation_gate is not None:
             self._cancellation_gate.request_stop()
@@ -514,7 +529,7 @@ class OverlayWindow(QWidget):
         menu.popup_at(global_pos)
 
     def _show_chat_popup(self, global_pos: QPoint) -> None:
-        popup = ChatPopup(self)
+        popup = ChatPopup(self, voice_capture=self._voice_capture, stt_worker=self._stt_worker)
         popup.text_submitted.connect(self._route_chat_text)
         popup.popup_at(global_pos)
 

@@ -15,6 +15,7 @@ def test_create_tts_provider_builds_edge_by_default() -> None:
     provider = create_tts_provider(TTSConfig())
 
     assert isinstance(provider, EdgeTTSProvider)
+    assert provider.pcm_format is None
 
 
 def test_create_tts_provider_builds_openai_when_selected() -> None:
@@ -40,6 +41,7 @@ def test_create_tts_provider_builds_elevenlabs_when_selected() -> None:
     provider = create_tts_provider(config)
 
     assert isinstance(provider, ElevenLabsTTSProvider)
+    assert provider.pcm_format is not None
 
 
 def test_create_tts_provider_elevenlabs_without_api_key_raises() -> None:

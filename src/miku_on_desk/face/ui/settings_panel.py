@@ -216,6 +216,10 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_model_edit = LineEdit(self)
         self._voice_cloning_api_key_edit = LineEdit(self)
         self._voice_cloning_base_url_edit = LineEdit(self)
+        self._voice_input_enabled_box = CheckBox("启用语音输入", self)
+        self._voice_input_api_key_edit = LineEdit(self)
+        self._voice_input_base_url_edit = LineEdit(self)
+        self._voice_input_language_edit = LineEdit(self)
 
         self._mcp_editor = _McpServerListEditor(self._settings.mcp_servers, self)
         self._agent_editor = _AgentProfileListEditor(self._settings.agent_profiles, self)
@@ -272,6 +276,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._load_computer_use()
         self._load_tts()
         self._load_voice_cloning()
+        self._load_voice_input()
 
         save_button = PrimaryPushButton("保存", self)
         save_button.clicked.connect(self._on_save_clicked)
@@ -317,6 +322,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_computer_use()
         self._collect_tts()
         self._collect_voice_cloning()
+        self._collect_voice_input()
         return self._settings.model_copy(deep=True)
 
     def _add_numeric_validation(
@@ -949,6 +955,28 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         )
         voice_cloning_card.viewLayout.addWidget(voice_cloning_container)
         layout.addWidget(voice_cloning_card)
+
+        voice_input_card = HeaderCardWidget("语音输入（ElevenLabs 实时流式转写）", self)
+        voice_input_container = QWidget(voice_input_card)
+        voice_input_form = QFormLayout(voice_input_container)
+        voice_input_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        voice_input_form.addRow(self._voice_input_enabled_box)
+        self._voice_input_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
+        self._voice_input_api_key_edit.setPlaceholderText("留空则不启用语音输入")
+        voice_input_form.addRow("ElevenLabs API Key", self._voice_input_api_key_edit)
+        self._voice_input_base_url_edit.setPlaceholderText("默认官方地址；自定义时不要带 /v1 后缀")
+        voice_input_form.addRow("ElevenLabs API Base URL", self._voice_input_base_url_edit)
+        self._voice_input_language_edit.setPlaceholderText("zh（留空则自动检测语言）")
+        voice_input_form.addRow("语言代码", self._voice_input_language_edit)
+        voice_input_form.addRow(
+            CaptionLabel(
+                "跟上方 TTS/声音克隆凭证互相独立；点击聊天输入框的麦克风按钮开始/结束录音，"
+                "转写结果写入输入框待确认，不会自动发送；改动需重启 Miku 才能生效",
+                voice_input_container,
+            )
+        )
+        voice_input_card.viewLayout.addWidget(voice_input_container)
+        layout.addWidget(voice_input_card)
         layout.addStretch(1)
 
         scroll_area = SingleDirectionScrollArea(self)
@@ -1005,6 +1033,20 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         voice_cloning.elevenlabs_base_url = (
             self._voice_cloning_base_url_edit.text().strip() or None
         )
+
+    def _load_voice_input(self) -> None:
+        voice_input = self._settings.voice_input
+        self._voice_input_enabled_box.setChecked(voice_input.enabled)
+        self._voice_input_api_key_edit.setText(voice_input.api_key or "")
+        self._voice_input_base_url_edit.setText(voice_input.base_url or "")
+        self._voice_input_language_edit.setText(voice_input.language_code or "")
+
+    def _collect_voice_input(self) -> None:
+        voice_input = self._settings.voice_input
+        voice_input.enabled = self._voice_input_enabled_box.isChecked()
+        voice_input.api_key = self._voice_input_api_key_edit.text().strip() or None
+        voice_input.base_url = self._voice_input_base_url_edit.text().strip() or None
+        voice_input.language_code = self._voice_input_language_edit.text().strip() or None
 
     def _on_save_clicked(self) -> None:
         settings = self.current_settings()
