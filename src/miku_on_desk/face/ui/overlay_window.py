@@ -67,7 +67,8 @@ _REFLOW_THROTTLE_MS = 33
 # Stop/StopFailure 代表一整轮外部会话结束，除了播放一次性反应外还要把常驻基线收回 IDLE，
 # 与 Brain 侧 LoopFinished 的处理方式对称——不能只靠 resolve_transition 的查表结果，
 # 因为查表只知道"这个事件对应哪个 transient"，不知道"这个事件还标志着一轮交互彻底结束"。
-_HOOK_EVENTS_RESETTING_BASELINE = frozenset({"Stop", "StopFailure"})
+# AfterAgent 是 Gemini CLI 里语义对应的"一轮 agent 交互结束"事件，同样需要收回 baseline。
+_HOOK_EVENTS_RESETTING_BASELINE = frozenset({"Stop", "StopFailure", "AfterAgent"})
 
 # express_reaction 工具的反应词表。
 _REACTION_STATE_MAP: dict[ReactionKind, PetState] = {

@@ -33,6 +33,7 @@ from miku_on_desk.config.settings import (
     AppSettings,
     BrainResilienceConfig,
     EnvBootstrap,
+    HookServerConfig,
     ModelTier,
     PersonaConfig,
     ProviderConfig,
@@ -41,6 +42,7 @@ from miku_on_desk.config.settings import (
     TTSProviderName,
 )
 from miku_on_desk.face.character_voice import PetVoiceConfig, save_pet_voice_config
+from miku_on_desk.face.hooks.bridge import HookEventBus
 from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, CharacterStandTile
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.face.ui.speech_controller import SpeechController, _SynthWorker
@@ -59,6 +61,7 @@ from miku_on_desk.main import (
     _resolve_speech_controller_for_settings,
     _run_brain_thread,
     _shortcut_bindings,
+    _start_hook_server,
     _startup_health_warnings,
     _sync_agent_profiles,
 )
@@ -626,4 +629,71 @@ def test_resolve_speech_controller_for_settings_keeps_old_controller_when_constr
         assert result is controller
         assert result._worker is old_worker
         controller.close()
+
+
+def _fake_hook_server() -> Mock:
+    server = Mock()
+    server.port = 8765
+    server.token = "tok1"
+    return server
+
+
+def test_start_hook_server_disabled_returns_none(tmp_path: Path) -> None:
+    result = _start_hook_server(
+        HookServerConfig(enabled=False), EnvBootstrap(data_dir=tmp_path), HookEventBus()
+    )
+
+    assert result is None
+
+
+def test_start_hook_server_installs_claude_code_by_default(tmp_path: Path) -> None:
+    with (
+        patch("miku_on_desk.main.HookServer", return_value=_fake_hook_server()),
+        patch("miku_on_desk.main.install") as install_claude,
+        patch("miku_on_desk.main.install_codex") as install_codex,
+        patch("miku_on_desk.main.install_gemini") as install_gemini,
+    ):
+        _start_hook_server(
+            HookServerConfig(), EnvBootstrap(data_dir=tmp_path), HookEventBus()
+        )
+
+    install_claude.assert_called_once()
+    install_codex.assert_not_called()
+    install_gemini.assert_not_called()
+
+
+def test_start_hook_server_installs_codex_and_gemini_when_opted_in(tmp_path: Path) -> None:
+    with (
+        patch("miku_on_desk.main.HookServer", return_value=_fake_hook_server()),
+        patch("miku_on_desk.main.install") as install_claude,
+        patch("miku_on_desk.main.install_codex") as install_codex,
+        patch("miku_on_desk.main.install_gemini") as install_gemini,
+    ):
+        _start_hook_server(
+            HookServerConfig(install_codex=True, install_gemini_cli=True),
+            EnvBootstrap(data_dir=tmp_path),
+            HookEventBus(),
+        )
+
+    install_claude.assert_called_once()
+    install_codex.assert_called_once()
+    install_gemini.assert_called_once()
+
+
+def test_start_hook_server_claude_code_install_failure_does_not_block_others(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch("miku_on_desk.main.HookServer", return_value=_fake_hook_server()),
+        patch("miku_on_desk.main.install", side_effect=RuntimeError("炸了")),
+        patch("miku_on_desk.main.install_codex") as install_codex,
+    ):
+        result = _start_hook_server(
+            HookServerConfig(install_codex=True),
+            EnvBootstrap(data_dir=tmp_path),
+            HookEventBus(),
+        )
+
+    assert result is not None
+    install_codex.assert_called_once()
 

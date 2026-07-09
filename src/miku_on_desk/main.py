@@ -91,7 +91,14 @@ from miku_on_desk.config import (
 from miku_on_desk.config.logging_config import setup_logging
 from miku_on_desk.face.character_voice import resolve_tts_config_for_pet
 from miku_on_desk.face.hooks.bridge import HookEventBus
-from miku_on_desk.face.hooks.installer import default_claude_settings_path, install
+from miku_on_desk.face.hooks.installer import (
+    default_claude_settings_path,
+    default_codex_hooks_path,
+    default_gemini_settings_path,
+    install,
+    install_codex,
+    install_gemini,
+)
 from miku_on_desk.face.hooks.server import PET_EVENT_PATH, HookServer
 from miku_on_desk.face.stt_worker import SttWorker
 from miku_on_desk.face.ui.audio_capture import PcmAudioCapture
@@ -561,17 +568,41 @@ def _start_hook_server(
     server.start()
 
     url = f"http://{config.host}:{server.port}{PET_EVENT_PATH}"
-    try:
-        install(
-            default_claude_settings_path(),
-            url=url,
-            token=server.token,
-            include_experimental=config.include_experimental,
-        )
-    except Exception:
-        # settings.json 格式异常或磁盘 I/O 失败都不能阻止 app 启动——hook 只是锦上添花的
-        # 视觉反馈，不是核心功能。
-        logger.exception("安装 Claude Code hook 失败，跳过")
+
+    # 三个 CLI 各自独立 try/except：某一个的配置文件格式异常或磁盘 I/O 失败，不能连带
+    # 影响其它 CLI 的安装，更不能阻止 app 启动——hook 只是锦上添花的视觉反馈，不是核心功能。
+    if config.install_claude_code:
+        try:
+            install(
+                default_claude_settings_path(),
+                url=url,
+                token=server.token,
+                include_experimental=config.include_experimental,
+            )
+        except Exception:
+            logger.exception("安装 Claude Code hook 失败，跳过")
+
+    if config.install_codex:
+        try:
+            install_codex(
+                default_codex_hooks_path(),
+                url=url,
+                token=server.token,
+                include_experimental=config.include_experimental,
+            )
+        except Exception:
+            logger.exception("安装 Codex CLI hook 失败，跳过")
+
+    if config.install_gemini_cli:
+        try:
+            install_gemini(
+                default_gemini_settings_path(),
+                url=url,
+                token=server.token,
+                include_experimental=config.include_experimental,
+            )
+        except Exception:
+            logger.exception("安装 Gemini CLI hook 失败，跳过")
 
     return server
 

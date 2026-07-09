@@ -39,6 +39,18 @@ _EVENT_TRANSITIONS: dict[str, Transition] = {
     "Stop": Transition(TransitionKind.TRANSIENT, PetState.SUCCESS),
     "StopFailure": Transition(TransitionKind.TRANSIENT, PetState.ERROR),
     "SessionEnd": Transition(TransitionKind.BASELINE, PetState.IDLE),
+    # Codex CLI 专属事件（SessionStart/PreToolUse/PostToolUse/UserPromptSubmit/Stop/
+    # PermissionRequest 与 Claude Code 同名，复用上面的条目，不重复列出）。
+    "SubagentStart": Transition(TransitionKind.BASELINE, PetState.TOOL_RUNNING),
+    "SubagentStop": Transition(TransitionKind.TRANSIENT, PetState.SUCCESS),
+    "PreCompact": Transition(TransitionKind.TRANSIENT, PetState.NOTICE),
+    "PostCompact": Transition(TransitionKind.TRANSIENT, PetState.NOTICE),
+    # Gemini CLI 专属事件。
+    "BeforeTool": Transition(TransitionKind.BASELINE, PetState.TOOL_RUNNING),
+    "AfterTool": Transition(TransitionKind.TRANSIENT, PetState.SUCCESS),
+    "BeforeAgent": Transition(TransitionKind.BASELINE, PetState.THINKING),
+    "AfterAgent": Transition(TransitionKind.TRANSIENT, PetState.SUCCESS),
+    "Notification": Transition(TransitionKind.BASELINE, PetState.CONFIRMATION_PENDING),
 }
 
 

@@ -293,7 +293,13 @@ class ComputerUseConfig(BaseModel):
 
 
 class HookServerConfig(BaseModel):
-    """本地 hook sidecar（接收 Claude Code 等外部 CLI 工具的通知）的监听设置。
+    """本地 hook sidecar（接收 Claude Code/Codex CLI/Gemini CLI 等外部 CLI 工具的通知）
+    的监听设置。
+
+    ``install_codex``/``install_gemini_cli`` 默认关闭：与 ``include_experimental`` 一样是
+    保守 opt-in——这两家目前只能通过 ``face/hooks/forward.py`` 转发层接入（见
+    ``face/hooks/installer.py`` 模块文档），涉及往用户自己的 CLI 配置文件里写入内容，
+    先默认不动、等用户确认需要再打开。
 
     ``include_experimental`` 默认关闭：见 ``face/hooks/installer.py`` 模块文档,
     ``PreToolUse``/``PermissionRequest``/``PermissionDenied`` 的响应体可能被 Claude Code
@@ -304,6 +310,9 @@ class HookServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     include_experimental: bool = False
+    install_claude_code: bool = True
+    install_codex: bool = False
+    install_gemini_cli: bool = False
 
 
 class ImageGenerationConfig(BaseModel):

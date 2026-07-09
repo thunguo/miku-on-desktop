@@ -716,6 +716,19 @@ def test_hook_event_stop_resets_baseline_to_idle_after_transient(
     assert window._state_machine.current_state(window._elapsed()) == PetState.SUCCESS
 
 
+def test_hook_event_after_agent_resets_baseline_to_idle_after_transient(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    hook_bus = HookEventBus()
+    window = _make_window(tmp_path, hook_bus=hook_bus)
+    hook_bus.emit_event(HookEvent(event="BeforeAgent"))
+
+    hook_bus.emit_event(HookEvent(event="AfterAgent"))
+
+    assert window._state_machine._baseline_state == PetState.IDLE
+    assert window._state_machine.current_state(window._elapsed()) == PetState.SUCCESS
+
+
 def test_hook_event_unknown_event_is_ignored(qapp: QApplication, tmp_path: Path) -> None:
     hook_bus = HookEventBus()
     window = _make_window(tmp_path, hook_bus=hook_bus)
