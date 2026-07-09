@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QContextMenuEvent, QKeySequence, QMouseEvent, QShortcut
+from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from miku_on_desk.brain.providers.base import ToolUseBlock
@@ -137,8 +137,6 @@ class OverlayWindow(QWidget):
         cancellation_gate: CancellationGate | None = None,
         hook_bus: HookEventBus | None = None,
         actions: PetActions | None = None,
-        confirm_yes_shortcut: str = "Ctrl+Shift+Y",
-        confirm_no_shortcut: str = "Ctrl+Shift+N",
         speech_controller: SpeechController | None = None,
         voice_capture: PcmAudioCapture | None = None,
         stt_worker: SttWorker | None = None,
@@ -170,10 +168,6 @@ class OverlayWindow(QWidget):
 
         self._bubble = SpeechBubble(self)
         self._bubble.decision_made.connect(self._on_bubble_decision)
-        self._yes_shortcut = QShortcut(QKeySequence(confirm_yes_shortcut), self)
-        self._yes_shortcut.activated.connect(lambda: self._on_bubble_decision(True))
-        self._no_shortcut = QShortcut(QKeySequence(confirm_no_shortcut), self)
-        self._no_shortcut.activated.connect(lambda: self._on_bubble_decision(False))
 
         self._cancellation_gate = cancellation_gate
         self._stop_button = QPushButton("■", self)
@@ -506,6 +500,16 @@ class OverlayWindow(QWidget):
         """
         self._voice_capture = voice_capture
         self._stt_worker = stt_worker
+
+    def confirm_via_hotkey(self, approved: bool) -> None:
+        """全局热键触发确认（是/否）；复用 _on_bubble_decision 的判定逻辑——
+        没有待确认请求时是安全的 no-op。"""
+        self._on_bubble_decision(approved)
+
+    def open_chat_via_hotkey(self) -> None:
+        """全局热键触发聊天弹窗；复用 _show_chat_popup，没有点击位置可用，
+        用窗口自身位置作锚点，跟右键菜单用点击位置/托盘用光标位置类似。"""
+        self._show_chat_popup(self.pos())
 
     def _on_stop_clicked(self) -> None:
         if self._cancellation_gate is not None:

@@ -523,6 +523,7 @@ def test_current_settings_collects_empty_voice_cloning_fields_as_none(
 def test_shortcuts_tab_defaults_to_shift_ctrl_y_and_n(qapp: QApplication) -> None:
     panel = SettingsPanel(AppSettings(), Path("unused.json"))
 
+    assert panel._open_chat_edit.keySequence().toString() == "Ctrl+Shift+M"
     assert panel._confirm_yes_edit.keySequence().toString() == "Ctrl+Shift+Y"
     assert panel._confirm_no_edit.keySequence().toString() == "Ctrl+Shift+N"
 
@@ -532,10 +533,12 @@ def test_current_settings_collects_edited_shortcuts(qapp: QApplication) -> None:
 
     panel = SettingsPanel(AppSettings(), Path("unused.json"))
 
+    panel._open_chat_edit.setKeySequence(QKeySequence("Ctrl+Alt+M"))
     panel._confirm_yes_edit.setKeySequence(QKeySequence("Ctrl+Alt+Y"))
     panel._confirm_no_edit.setKeySequence(QKeySequence("Ctrl+Alt+N"))
 
     shortcuts = panel.current_settings().shortcuts
+    assert shortcuts.open_chat == "Ctrl+Alt+M"
     assert shortcuts.confirm_yes == "Ctrl+Alt+Y"
     assert shortcuts.confirm_no == "Ctrl+Alt+N"
 

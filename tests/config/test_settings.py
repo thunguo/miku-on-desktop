@@ -157,12 +157,14 @@ def test_app_settings_memory_dir_roundtrip_through_save_and_load(tmp_path: Path)
 def test_shortcuts_config_defaults_to_shift_ctrl_y_and_n() -> None:
     shortcuts = ShortcutsConfig()
 
+    assert shortcuts.open_chat == "Ctrl+Shift+M"
     assert shortcuts.confirm_yes == "Ctrl+Shift+Y"
     assert shortcuts.confirm_no == "Ctrl+Shift+N"
 
 
 def test_app_settings_shortcuts_roundtrip_through_save_and_load(tmp_path: Path) -> None:
     settings = AppSettings()
+    settings.shortcuts.open_chat = "Ctrl+Alt+M"
     settings.shortcuts.confirm_yes = "Ctrl+Alt+Y"
     settings.shortcuts.confirm_no = "Ctrl+Alt+N"
 
@@ -170,6 +172,7 @@ def test_app_settings_shortcuts_roundtrip_through_save_and_load(tmp_path: Path) 
     settings.save(path)
     loaded = AppSettings.load(path)
 
+    assert loaded.shortcuts.open_chat == "Ctrl+Alt+M"
     assert loaded.shortcuts.confirm_yes == "Ctrl+Alt+Y"
     assert loaded.shortcuts.confirm_no == "Ctrl+Alt+N"
 

@@ -83,6 +83,7 @@ from miku_on_desk.config import (
     ModelTier,
     PersonaConfig,
     ProviderName,
+    ShortcutsConfig,
     default_settings_path,
     load_settings_with_vault,
     save_settings_with_vault,
@@ -98,6 +99,7 @@ from miku_on_desk.face.ui.character_clone_dialog import CharacterCloneDialog
 from miku_on_desk.face.ui.character_creation_dialog import CharacterCreationDialog
 from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel
 from miku_on_desk.face.ui.chat_popup import ChatPopup
+from miku_on_desk.face.ui.global_hotkeys import GlobalHotKeyManager
 from miku_on_desk.face.ui.memory_panel import MemoryPanel
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.face.ui.settings_panel import SettingsPanel
@@ -846,11 +848,20 @@ def _startup_health_warnings(settings: AppSettings, bootstrap: EnvBootstrap) -> 
 
         if not is_accessibility_trusted():
             warnings.append(
-                "尚未授权「辅助功能」权限，操作电脑（点击/输入/切换应用）将静默失败——"
+                "尚未授权「辅助功能」权限，操作电脑（点击/输入/切换应用）和全局快捷键"
+                "（打开聊天/确认是否）都会静默失效——"
                 "请前往 系统设置 → 隐私与安全性 → 辅助功能，勾选本应用后重启。"
             )
 
     return warnings
+
+
+def _shortcut_bindings(shortcuts: ShortcutsConfig) -> dict[str, str]:
+    return {
+        "open_chat": shortcuts.open_chat,
+        "confirm_yes": shortcuts.confirm_yes,
+        "confirm_no": shortcuts.confirm_no,
+    }
 
 
 def _build_tray_icon(
@@ -969,6 +980,7 @@ def main() -> None:
             _, worker = voice_input
             worker.stop()
             worker.wait(3000)
+        hotkey_manager.close()
         vault.close()
         app.quit()
 
@@ -988,6 +1000,7 @@ def main() -> None:
         voice_input = _resolve_voice_input_for_settings(new_settings, voice_input)
         new_capture, new_worker = voice_input if voice_input is not None else (None, None)
         window.set_voice_input(new_capture, new_worker)
+        hotkey_manager.rebind(_shortcut_bindings(new_settings.shortcuts))
 
     def _open_settings() -> SettingsPanel:
         panel = _open_settings_panel(settings_path, open_windows, vault=vault)
@@ -1019,13 +1032,24 @@ def main() -> None:
         cancellation_gate=cancellation_gate,
         hook_bus=hook_bus,
         actions=actions,
-        confirm_yes_shortcut=settings.shortcuts.confirm_yes,
-        confirm_no_shortcut=settings.shortcuts.confirm_no,
         speech_controller=speech_controller,
         voice_capture=voice_capture,
         stt_worker=stt_worker,
     )
     window.show()
+
+    hotkey_manager = GlobalHotKeyManager()
+
+    def _on_global_hotkey(action: str) -> None:
+        if action == "open_chat":
+            window.open_chat_via_hotkey()
+        elif action == "confirm_yes":
+            window.confirm_via_hotkey(True)
+        elif action == "confirm_no":
+            window.confirm_via_hotkey(False)
+
+    hotkey_manager.hotkey_triggered.connect(_on_global_hotkey)
+    hotkey_manager.rebind(_shortcut_bindings(settings.shortcuts))
 
     tray, _tray_menu = _build_tray_icon(
         app, actions, voice_capture=voice_capture, stt_worker=stt_worker

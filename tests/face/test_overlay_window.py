@@ -359,22 +359,6 @@ async def test_confirmation_requested_while_previous_unresolved_auto_denies_stal
     assert window._pending_confirmation_request_id == "second"
 
 
-def test_default_shortcuts_match_shift_ctrl_y_and_n(qapp: QApplication, tmp_path: Path) -> None:
-    window = _make_window(tmp_path)
-
-    assert window._yes_shortcut.key().toString() == "Ctrl+Shift+Y"
-    assert window._no_shortcut.key().toString() == "Ctrl+Shift+N"
-
-
-def test_custom_shortcuts_are_used_when_provided(qapp: QApplication, tmp_path: Path) -> None:
-    window = _make_window(
-        tmp_path, confirm_yes_shortcut="Ctrl+Alt+Y", confirm_no_shortcut="Ctrl+Alt+N"
-    )
-
-    assert window._yes_shortcut.key().toString() == "Ctrl+Alt+Y"
-    assert window._no_shortcut.key().toString() == "Ctrl+Alt+N"
-
-
 async def test_yes_shortcut_activated_approves_pending_confirmation(
     qapp: QApplication, tmp_path: Path
 ) -> None:
@@ -386,7 +370,7 @@ async def test_yes_shortcut_activated_approves_pending_confirmation(
     async def press_yes_once_prompted() -> None:
         for _ in range(50):
             if window._bubble.is_awaiting_confirmation():
-                window._yes_shortcut.activated.emit()
+                window.confirm_via_hotkey(True)
                 return
             await asyncio.sleep(0)
         pytest.fail("确认气泡没有在预期时间内出现")
@@ -410,7 +394,7 @@ async def test_no_shortcut_activated_rejects_pending_confirmation(
     async def press_no_once_prompted() -> None:
         for _ in range(50):
             if window._bubble.is_awaiting_confirmation():
-                window._no_shortcut.activated.emit()
+                window.confirm_via_hotkey(False)
                 return
             await asyncio.sleep(0)
         pytest.fail("确认气泡没有在预期时间内出现")
@@ -430,10 +414,22 @@ def test_shortcut_activation_without_pending_confirmation_is_noop(
     gate = ConfirmationGate(bus)
     window = _make_window(tmp_path, event_bus=bus, confirmation_gate=gate)
 
-    window._yes_shortcut.activated.emit()
-    window._no_shortcut.activated.emit()
+    window.confirm_via_hotkey(True)
+    window.confirm_via_hotkey(False)
 
     assert window._pending_confirmation_request_id is None
+
+
+def test_open_chat_via_hotkey_shows_chat_popup(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+    window = _make_window(tmp_path)
+
+    window.open_chat_via_hotkey()
+
+    assert len(created_popups) == 1
 
 
 def test_queued_message_injected_triggers_notice_transient(
