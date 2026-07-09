@@ -57,7 +57,9 @@ from miku_on_desk.brain.providers.base import Message, Provider, TextBlock
 from miku_on_desk.brain.secrets.vault import SecretVault, default_vault_paths
 from miku_on_desk.brain.skills.manager import default_skill_manager, register_skill_tool
 from miku_on_desk.brain.tools.builtin.computer_input import register_computer_input_tool
+from miku_on_desk.brain.tools.builtin.exec_command import register_exec_command_tool
 from miku_on_desk.brain.tools.builtin.express_reaction import register_express_reaction_tool
+from miku_on_desk.brain.tools.builtin.file_tools import register_file_tools
 from miku_on_desk.brain.tools.builtin.memory_tools import register_memory_tools
 from miku_on_desk.brain.tools.builtin.screen_analyze import register_screen_analyze_tool
 from miku_on_desk.brain.tools.path_sandbox import default_path_sandbox
@@ -300,6 +302,8 @@ async def _brain_main(
     policy = default_policy_engine(settings.permissions, path_sandbox, read_tracker)
     registry = ToolRegistry(policy, read_tracker)
     register_express_reaction_tool(event_bus, registry)
+    register_file_tools(registry)
+    register_exec_command_tool(registry)
 
     await asyncio.to_thread(memory_system.base.start_session, session_id, "桌面对话")
     register_memory_tools(memory_system, registry)
