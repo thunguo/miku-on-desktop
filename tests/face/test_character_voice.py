@@ -122,3 +122,13 @@ def test_resolve_tts_config_for_pet_enabled_always_follows_global_tts_enabled(
     resolved_enabled = resolve_tts_config_for_pet(tmp_path, settings)
 
     assert resolved_enabled.enabled is True
+
+
+def test_miku_pixel_default_asset_has_valid_edge_voice_config() -> None:
+    pet_dir = Path(__file__).resolve().parents[2] / "assets" / "pets" / "miku_pixel"
+
+    config = load_pet_voice_config(pet_dir)
+
+    assert config is not None
+    assert config.provider is TTSProviderName.EDGE
+    assert config.voice == "zh-CN-XiaoxiaoNeural"
