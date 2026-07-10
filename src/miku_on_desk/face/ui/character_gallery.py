@@ -146,7 +146,7 @@ class CharacterStandTile(QWidget):
 
 
 class _CreateCharacterTile(QWidget):
-    """ "＋ 创建新角色"格，虚线边框区分于普通角色展台。"""
+    """“＋ 创建新角色”格，虚线边框区分于普通角色展台。"""
 
     clicked = Signal()
 
