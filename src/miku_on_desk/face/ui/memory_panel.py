@@ -47,6 +47,7 @@ _ENTITY_TYPES: list[EntityType] = [
 ]
 _MANUAL_EXTRACTED_BY = "tool:remember"
 _DATA_ROLE = int(Qt.ItemDataRole.UserRole)
+_MAX_DUPLICATE_SCAN_UNITS = 200
 
 
 def _populate_semantic_tree(tree: TreeWidget, facts: list[Fact]) -> None:
@@ -174,8 +175,10 @@ def _confirm_delete(parent: QWidget, name: str) -> bool:
 
 
 def _count_duplicate_groups(system: MemorySystem) -> int:
-    """全库扫描 base 层记录，按语义相似度阈值统计疑似重复的记忆分组数。"""
+    """统计疑似重复组数，并为避免 UI 卡顿仅扫描前 N 条 base 记录。"""
     units = system.base.list_units()
+    if len(units) > _MAX_DUPLICATE_SCAN_UNITS:
+        units = units[:_MAX_DUPLICATE_SCAN_UNITS]
     visited: set[str] = set()
     groups = 0
     for unit in units:
@@ -192,6 +195,13 @@ def _count_duplicate_groups(system: MemorySystem) -> int:
 def _render_diagnostics(system: MemorySystem) -> str:
     tuning = system.tuning
     active_facts = system.semantic.list_facts(status="active")
+    base_unit_count = len(system.base.list_units())
+    duplicate_groups = _count_duplicate_groups(system)
+    duplicate_groups_line = f"疑似重复记忆组数（全库扫描）：{duplicate_groups}"
+    if base_unit_count > _MAX_DUPLICATE_SCAN_UNITS:
+        duplicate_groups_line = (
+            f"{duplicate_groups_line}（基于前 {_MAX_DUPLICATE_SCAN_UNITS} 条记录的顺序截断结果）"
+        )
     filtered_count = sum(
         1 for fact in active_facts if not (fact.confidence > tuning.retrieval_min_confidence)
     )
@@ -203,8 +213,8 @@ def _render_diagnostics(system: MemorySystem) -> str:
         "",
         f"活跃语义事实总数：{len(active_facts)}",
         f"其中会被检索阈值过滤掉的条数：{filtered_count}",
-        f"base 层原始记录总数：{len(system.base.list_units())}",
-        f"疑似重复记忆组数（全库扫描）：{_count_duplicate_groups(system)}",
+        f"base 层原始记录总数：{base_unit_count}",
+        duplicate_groups_line,
     ]
     return "\n".join(lines)
 
