@@ -281,9 +281,13 @@ async def _extract_emotional(
         return
 
     merged = dict(current)
+    applied = False
     for path, value, confidence in updates:
         if confidence >= min_confidence:
             _set_by_path(merged, path, value)
+            applied = True
+    if not applied:
+        return
     merged["last_updated"] = _now_iso()
     emotional.save_preferences(merged)
 
