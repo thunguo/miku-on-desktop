@@ -58,18 +58,28 @@ def _make_pet_dir(
     dir_name: str = "pet",
     pet_name: str = "test_pet",
     frame_size: int = _FRAME_SIZE,
+    extra_states: dict[str, dict[str, object]] | None = None,
 ) -> Path:
     pet_dir = tmp_path / dir_name
     pet_dir.mkdir()
     Image.new("RGBA", (frame_size, frame_size), (255, 0, 0, 255)).save(pet_dir / "spritesheet.png")
+    states: dict[str, dict[str, object]] = {
+        "idle": {"row": 0, "frame_count": 1, "fps": 1.0, "loop": True}
+    }
+    rows = 1
+    columns = 1
+    if extra_states:
+        states.update(extra_states)
+        rows = max(int(info["row"]) + 1 for info in states.values())
+        columns = max(int(info["frame_count"]) for info in states.values())
     meta = {
         "pet_name": pet_name,
         "frame_width": frame_size,
         "frame_height": frame_size,
-        "columns": 1,
-        "rows": 1,
+        "columns": columns,
+        "rows": rows,
         "fallback_state": "idle",
-        "states": {"idle": {"row": 0, "frame_count": 1, "fps": 1.0, "loop": True}},
+        "states": states,
     }
     (pet_dir / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
     return pet_dir
@@ -1158,6 +1168,36 @@ def test_context_menu_chat_popup_routes_to_queue_message_when_busy(
     assert talked == []
 
 
+def test_chat_popup_barge_in_requested_stops_speech_and_requests_cancel(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+
+    requested: list[None] = []
+    gate = CancellationGate()
+    monkeypatch.setattr(gate, "request_stop", lambda: requested.append(None))
+    speech_controller = Mock()
+    window = _make_window(tmp_path, cancellation_gate=gate, speech_controller=speech_controller)
+
+    window._show_chat_popup(QPoint(10, 10))
+    created_popups[0].barge_in_requested.emit()
+
+    assert requested == [None]
+    speech_controller.stop.assert_called_once_with()
+
+
+def test_chat_popup_barge_in_requested_without_gates_is_noop(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+    window = _make_window(tmp_path)
+
+    window._show_chat_popup(QPoint(10, 10))
+    created_popups[0].barge_in_requested.emit()
+
+
 def test_set_pet_dir_replaces_sprite_widget_and_resets_state_machine(
     qapp: QApplication, tmp_path: Path
 ) -> None:
@@ -1189,6 +1229,70 @@ def test_set_speech_controller_replaces_internal_reference(
     window.set_speech_controller(new_controller)
 
     assert window._speech_controller is new_controller
+
+
+def test_set_speech_controller_disconnects_old_audio_level_signal(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    old_controller = Mock()
+    window = _make_window(tmp_path, speech_controller=old_controller)
+    new_controller = Mock()
+
+    window.set_speech_controller(new_controller)
+
+    old_controller.audio_level_changed.disconnect.assert_called_once_with(
+        window._on_audio_level_changed
+    )
+
+
+def test_talking_frame_advance_is_modulated_by_audio_level(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pet_dir = _make_pet_dir(
+        tmp_path,
+        extra_states={"talking": {"row": 1, "frame_count": 8, "fps": 10.0, "loop": True}},
+    )
+    clock = {"t": 0.0}
+    monkeypatch.setattr(overlay_window_module.time, "monotonic", lambda: clock["t"])
+    window = OverlayWindow(pet_dir, speech_controller=Mock())
+    window._state_machine.set_baseline_state(PetState.TALKING, t=window._elapsed())
+
+    window._on_animation_tick()
+    window._on_audio_level_changed(0.0)
+    for _ in range(5):
+        clock["t"] += 0.1
+        window._on_animation_tick()
+
+    assert window._sprite_widget._current_key == (PetState.TALKING, 0)
+
+    window._on_audio_level_changed(1.0)
+    for _ in range(5):
+        clock["t"] += 0.1
+        window._on_animation_tick()
+
+    assert window._sprite_widget._current_key[0] == PetState.TALKING
+    assert window._sprite_widget._current_key[1] > 0
+
+
+def test_talking_frame_advance_ignores_audio_level_without_speech_controller(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pet_dir = _make_pet_dir(
+        tmp_path,
+        extra_states={"talking": {"row": 1, "frame_count": 8, "fps": 10.0, "loop": True}},
+    )
+    clock = {"t": 0.0}
+    monkeypatch.setattr(overlay_window_module.time, "monotonic", lambda: clock["t"])
+    window = OverlayWindow(pet_dir)
+    window._state_machine.set_baseline_state(PetState.TALKING, t=window._elapsed())
+    window._on_audio_level_changed(0.0)
+
+    window._on_animation_tick()
+    clock["t"] = 0.5
+    window._on_animation_tick()
+
+    assert window._sprite_widget._current_key[0] == PetState.TALKING
+    assert window._sprite_widget._current_key[1] > 0
 
 
 def test_set_pet_dir_new_sprite_widget_is_visible_after_window_shown(

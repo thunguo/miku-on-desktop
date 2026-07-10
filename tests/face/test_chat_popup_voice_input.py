@@ -70,6 +70,31 @@ def test_click_mic_button_starts_recording(
     assert calls["start_capture"] == [True]
 
 
+def test_click_mic_button_to_start_recording_emits_barge_in_requested(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    popup, _calls = _build_popup(monkeypatch)
+    emitted: list[None] = []
+    popup.barge_in_requested.connect(lambda: emitted.append(None))
+
+    popup._on_mic_button_clicked(True)
+
+    assert emitted == [None]
+
+
+def test_click_mic_button_to_stop_recording_does_not_emit_barge_in_requested(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    popup, _calls = _build_popup(monkeypatch)
+    popup._on_mic_button_clicked(True)
+    emitted: list[None] = []
+    popup.barge_in_requested.connect(lambda: emitted.append(None))
+
+    popup._on_mic_button_clicked(False)
+
+    assert emitted == []
+
+
 def test_click_mic_button_again_stops_and_begins_finalizing(
     qapp: QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:

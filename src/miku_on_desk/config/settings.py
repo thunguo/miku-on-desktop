@@ -270,6 +270,11 @@ class TTSConfig(BaseModel):
 
     设置面板保存后立即热切换生效（``main.py::_resolve_speech_controller_for_settings``），
     不需要重启应用。
+
+    ``fallback_to_edge`` 默认关闭：开启后合成失败（Key 失效/欠费/网络抖动）会自动换 Edge
+    说完这句话，但代价是当前引擎（若原生输出裸 PCM，如 ElevenLabs）会从逐块实时流式播放
+    退化为整句合成完才出声——这是维持"降级候选之间播放格式互相安全兼容"的必要代价，涉及
+    产品行为变化，需要用户主动打开。
     """
 
     enabled: bool = False
@@ -282,6 +287,7 @@ class TTSConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = "tts-1"
+    fallback_to_edge: bool = False
 
 
 class ComputerUseConfig(BaseModel):

@@ -13,13 +13,18 @@
 
 from __future__ import annotations
 
+import struct
 from collections.abc import AsyncIterator
 
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from miku_on_desk.brain.tts.base import PcmFormat
-from miku_on_desk.face.ui.speech_controller import SpeechController, _SynthWorker
+from miku_on_desk.face.ui.speech_controller import (
+    _MP3_FALLBACK_LEVEL,
+    SpeechController,
+    _SynthWorker,
+)
 
 
 class _FakeDevice:
@@ -289,4 +294,135 @@ def test_set_provider_keeps_sink_when_pcm_format_unchanged(qapp: QApplication) -
     # set_provider() 打断时的常规清理。
     assert controller._sink is fake_sink
     assert fake_sink.stopped == 1
+    controller.close()
+
+
+def test_pcm_rms_level_zero_bytes_is_zero() -> None:
+    assert SpeechController._pcm_rms_level(b"\x00\x00\x00\x00") == 0.0
+
+
+def test_pcm_rms_level_full_scale_amplitude_is_clamped_to_one() -> None:
+    chunk = struct.pack("<2h", 4000, -4000)
+
+    assert SpeechController._pcm_rms_level(chunk) == pytest.approx(1.0)
+
+
+def test_pcm_rms_level_odd_length_chunk_truncates_trailing_byte() -> None:
+    chunk = struct.pack("<1h", 4000) + b"\x01"
+
+    assert SpeechController._pcm_rms_level(chunk) == pytest.approx(1.0)
+
+
+def test_pcm_rms_level_returns_zero_for_sub_sample_chunk() -> None:
+    assert SpeechController._pcm_rms_level(b"\x01") == 0.0
+
+
+def test_drip_tick_emits_rms_level_for_written_pcm_chunk(qapp: QApplication) -> None:
+    controller = SpeechController(_FakePcmProvider())
+    fake_sink = _FakeSink()
+    controller._sink = fake_sink  # type: ignore[assignment]
+    controller._sink_device = fake_sink.device
+    controller._backlog.extend(struct.pack("<2h", 4000, -4000))
+    controller._pending_sentences = 1
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller._drip_tick()
+
+    assert levels == [pytest.approx(1.0)]
+    controller.close()
+
+
+def test_drip_tick_zeroes_level_when_backlog_exhausted_and_no_pending_sentences(
+    qapp: QApplication,
+) -> None:
+    controller = SpeechController(_FakePcmProvider())
+    fake_sink = _FakeSink()
+    controller._sink = fake_sink  # type: ignore[assignment]
+    controller._sink_device = fake_sink.device
+    controller._audio_level = 0.5
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller._drip_tick()
+
+    assert levels == [0.0]
+    controller.close()
+
+
+def test_pump_sets_mp3_fallback_level_when_playback_starts(qapp: QApplication) -> None:
+    controller = SpeechController(_FakeMp3Provider())
+    path = controller._temp_dir / "0.mp3"
+    path.write_bytes(b"fake-mp3-bytes")
+    controller._play_queue = [path]
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller._pump()
+
+    assert levels == [pytest.approx(_MP3_FALLBACK_LEVEL)]
+    controller.close()
+
+
+def test_advance_zeroes_level_when_play_queue_exhausted(qapp: QApplication) -> None:
+    controller = SpeechController(_FakeMp3Provider())
+    current = controller._temp_dir / "0.mp3"
+    current.write_bytes(b"current")
+    controller._current = current
+    controller._playing = True
+    controller._audio_level = _MP3_FALLBACK_LEVEL
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller._advance()
+
+    assert controller._playing is False
+    assert levels == [0.0]
+    controller.close()
+
+
+def test_advance_keeps_nonzero_level_when_next_item_starts(qapp: QApplication) -> None:
+    controller = SpeechController(_FakeMp3Provider())
+    first = controller._temp_dir / "0.mp3"
+    first.write_bytes(b"first")
+    second = controller._temp_dir / "1.mp3"
+    second.write_bytes(b"second")
+    controller._play_queue = [second]
+    controller._current = first
+    controller._playing = True
+    controller._audio_level = _MP3_FALLBACK_LEVEL
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller._advance()
+
+    assert controller._playing is True
+    assert controller._current == second
+    assert levels == []
+    controller.close()
+
+
+def test_stop_zeroes_audio_level_regardless_of_path(qapp: QApplication) -> None:
+    controller = SpeechController(_FakePcmProvider())
+    fake_sink = _FakeSink()
+    controller._sink = fake_sink  # type: ignore[assignment]
+    controller._audio_level = 0.9
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller.stop()
+
+    assert levels == [0.0]
+    controller.close()
+
+
+def test_set_audio_level_does_not_reemit_unchanged_value(qapp: QApplication) -> None:
+    controller = SpeechController(_FakeMp3Provider())
+    levels: list[float] = []
+    controller.audio_level_changed.connect(levels.append)
+
+    controller._set_audio_level(0.5)
+    controller._set_audio_level(0.5)
+
+    assert levels == [pytest.approx(0.5)]
     controller.close()

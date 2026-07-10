@@ -215,6 +215,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_api_key_edit = LineEdit(self)
         self._tts_base_url_edit = LineEdit(self)
         self._tts_model_edit = LineEdit(self)
+        self._tts_fallback_enabled_box = CheckBox("合成失败自动降级到 Edge", self)
         self._voice_cloning_api_key_edit = LineEdit(self)
         self._voice_cloning_base_url_edit = LineEdit(self)
         self._voice_input_enabled_box = CheckBox("启用语音输入", self)
@@ -454,7 +455,6 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         )
         self._settings.persona = persona
         return persona
-
 
     def _build_permissions_tab(self) -> QWidget:
         container = QWidget(self)
@@ -848,9 +848,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._settings.model_router.enable_cross_provider_fallback = (
             self._enable_cross_provider_fallback_box.isChecked()
         )
-        self._settings.hook_server.include_experimental = (
-            self._include_experimental_box.isChecked()
-        )
+        self._settings.hook_server.include_experimental = self._include_experimental_box.isChecked()
 
         loop_behavior = self._settings.loop_behavior
         loop_behavior.max_tool_rounds = _parse_int(
@@ -931,32 +929,29 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_model_edit.setPlaceholderText("tts-1")
         form.addRow("模型（model）", self._tts_model_edit)
 
+        form.addRow(self._tts_fallback_enabled_box)
         form.addRow(
             CaptionLabel(
-                "Edge 免 Key 但必须联网；OpenAI 兼容需填 Key/Base URL；改动需重启 Miku 才能生效",
+                "Edge 免 Key 但必须联网；OpenAI 兼容需填 Key/Base URL；改动需重启 Miku 才能生效；"
+                "「合成失败自动降级到 Edge」开启后若当前引擎能流式播放（如 ElevenLabs），会退化为"
+                "整句合成完才出声",
                 tts_container,
             )
         )
         tts_card.viewLayout.addWidget(tts_container)
         layout.addWidget(tts_card)
 
-        voice_cloning_card = HeaderCardWidget(
-            "声音克隆（ElevenLabs Instant Voice Cloning）", self
-        )
+        voice_cloning_card = HeaderCardWidget("声音克隆（ElevenLabs Instant Voice Cloning）", self)
         voice_cloning_container = QWidget(voice_cloning_card)
         voice_cloning_form = QFormLayout(voice_cloning_container)
-        voice_cloning_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
+        voice_cloning_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self._voice_cloning_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
         self._voice_cloning_api_key_edit.setPlaceholderText("留空则跳过声音克隆")
         voice_cloning_form.addRow("ElevenLabs API Key", self._voice_cloning_api_key_edit)
         self._voice_cloning_base_url_edit.setPlaceholderText(
             "默认官方地址；自定义时不要带 /v1 后缀"
         )
-        voice_cloning_form.addRow(
-            "ElevenLabs API Base URL", self._voice_cloning_base_url_edit
-        )
+        voice_cloning_form.addRow("ElevenLabs API Base URL", self._voice_cloning_base_url_edit)
         voice_cloning_form.addRow(
             CaptionLabel(
                 "跟上方 TTS 播放凭证互相独立，用于「克隆角色」/「更换声音」的录音克隆步骤",
@@ -1016,6 +1011,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_api_key_edit.setText(tts.api_key or "")
         self._tts_base_url_edit.setText(tts.base_url or "")
         self._tts_model_edit.setText(tts.model)
+        self._tts_fallback_enabled_box.setChecked(tts.fallback_to_edge)
         self._on_tts_provider_changed(self._tts_provider_combo.currentIndex())
 
     def _collect_tts(self) -> None:
@@ -1029,6 +1025,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         tts.api_key = self._tts_api_key_edit.text().strip() or None
         tts.base_url = self._tts_base_url_edit.text().strip() or None
         tts.model = self._tts_model_edit.text().strip() or defaults.model
+        tts.fallback_to_edge = self._tts_fallback_enabled_box.isChecked()
 
     def _load_voice_cloning(self) -> None:
         voice_cloning = self._settings.voice_cloning
@@ -1037,12 +1034,8 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
 
     def _collect_voice_cloning(self) -> None:
         voice_cloning = self._settings.voice_cloning
-        voice_cloning.elevenlabs_api_key = (
-            self._voice_cloning_api_key_edit.text().strip() or None
-        )
-        voice_cloning.elevenlabs_base_url = (
-            self._voice_cloning_base_url_edit.text().strip() or None
-        )
+        voice_cloning.elevenlabs_api_key = self._voice_cloning_api_key_edit.text().strip() or None
+        voice_cloning.elevenlabs_base_url = self._voice_cloning_base_url_edit.text().strip() or None
 
     def _load_voice_input(self) -> None:
         voice_input = self._settings.voice_input
