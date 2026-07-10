@@ -223,6 +223,7 @@ class OverlayWindow(QWidget):
         self._growth_store = growth_store
         self._growth = growth_store.load() if growth_store is not None else CompanionGrowth()
         self._pending_confirmation_request_id: str | None = None
+        self._chat_popup: ChatPopup | None = None
         self._tool_use_names: dict[str, str] = {}
         self._acp_active_agent: str | None = None
         self._long_task_tool_use_id: str | None = None
@@ -612,10 +613,25 @@ class OverlayWindow(QWidget):
         menu.popup_at(global_pos)
 
     def _show_chat_popup(self, global_pos: QPoint) -> None:
+        """弹出聊天输入框。每次都新建实例以拿到最新的语音输入配置（``set_voice_input``
+        热切换后），但弹新的之前先显式关掉上一个——``ChatPopup`` 靠失焦自动关闭在 macOS
+        的 ``Qt::Tool`` 窗口上并不可靠，不主动去重的话右键/热键连点会让输入框越堆越多、
+        铺满屏幕且关不掉。配合 ``ChatPopup`` 的 ``WA_DeleteOnClose`` 保证同时至多一个。
+        """
+        if self._chat_popup is not None:
+            self._chat_popup.close()
         popup = ChatPopup(self, voice_capture=self._voice_capture, stt_worker=self._stt_worker)
         popup.text_submitted.connect(self._route_chat_text)
         popup.barge_in_requested.connect(self._on_barge_in_requested)
+        # destroyed 是异步的（deleteLater 到下一轮事件循环才真正回收），旧实例的 destroyed
+        # 可能晚于新实例赋值才到达，用身份判断避免把新弹出的 popup 引用误清空。
+        popup.destroyed.connect(lambda: self._on_chat_popup_destroyed(popup))
+        self._chat_popup = popup
         popup.popup_at(global_pos)
+
+    def _on_chat_popup_destroyed(self, popup: ChatPopup) -> None:
+        if self._chat_popup is popup:
+            self._chat_popup = None
 
     def _route_chat_text(self, text: str) -> None:
         """停止按钮可见即代表当前有 loop 在跑：忙碌时插话入队，空闲时照常直接开始新一轮。
