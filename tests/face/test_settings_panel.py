@@ -13,6 +13,7 @@ from miku_on_desk.config.settings import (
     AgentProfileConfig,
     AppSettings,
     ComputerUseConfig,
+    McpAutomationConfig,
     McpServerConfig,
     McpTransport,
     ModelTier,
@@ -625,9 +626,7 @@ def test_mcp_editor_add_remote_transport_config(qapp: QApplication) -> None:
     editor = panel._mcp_editor
 
     editor._name_edit.setText("remote-weather")
-    editor._transport_combo.setCurrentIndex(
-        list(McpTransport).index(McpTransport.STREAMABLE_HTTP)
-    )
+    editor._transport_combo.setCurrentIndex(list(McpTransport).index(McpTransport.STREAMABLE_HTTP))
     editor._url_edit.setText("https://example.com/mcp")
     editor._headers_edit.setPlainText("Authorization=Bearer abc123")
     editor._on_add_or_update()
@@ -869,3 +868,67 @@ def test_acp_editor_remove_does_nothing_when_confirmation_declined(
     editor._on_remove()
 
     assert len(editor._configs) == 1
+
+
+def test_mcp_editor_fill_template_populates_form_fields(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(mcp_servers=[]), Path("unused.json"))
+    editor = panel._mcp_editor
+
+    editor._template_combo.setCurrentText("Spotify")
+    editor._on_fill_template()
+
+    assert editor._name_edit.text() == "spotify"
+    assert editor._command_edit.text() == "npx"
+    assert editor._args_edit.text() == "-y, @spotify/mcp-server"
+
+
+def test_mcp_editor_fill_template_does_nothing_for_custom_option(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(mcp_servers=[]), Path("unused.json"))
+    editor = panel._mcp_editor
+
+    editor._name_edit.setText("kept")
+    editor._template_combo.setCurrentText("自定义")
+    editor._on_fill_template()
+
+    assert editor._name_edit.text() == "kept"
+
+
+def test_mcp_editor_load_and_collect_automation_round_trip(qapp: QApplication) -> None:
+    automation = McpAutomationConfig(
+        enabled=True,
+        trigger_event="UserPromptSubmit",
+        server_name="spotify",
+        tool_name="play",
+        tool_input={"uri": "spotify:track:123"},
+    )
+    panel = SettingsPanel(
+        AppSettings(mcp_servers=[], mcp_automation=automation), Path("unused.json")
+    )
+    editor = panel._mcp_editor
+
+    assert editor.collect_automation() == automation
+
+
+def test_mcp_editor_automation_tool_input_invalid_json_falls_back_to_empty_dict(
+    qapp: QApplication,
+) -> None:
+    panel = SettingsPanel(AppSettings(mcp_servers=[]), Path("unused.json"))
+    editor = panel._mcp_editor
+
+    editor._automation_input_edit.setPlainText("not valid json")
+
+    assert editor.collect_automation().tool_input == {}
+
+
+def test_current_settings_collects_mcp_automation(qapp: QApplication) -> None:
+    panel = SettingsPanel(AppSettings(mcp_servers=[]), Path("unused.json"))
+    editor = panel._mcp_editor
+    editor._automation_enabled_box.setChecked(True)
+    editor._automation_server_edit.setText("spotify")
+    editor._automation_tool_edit.setText("play")
+
+    settings = panel.current_settings()
+
+    assert settings.mcp_automation.enabled is True
+    assert settings.mcp_automation.server_name == "spotify"
+    assert settings.mcp_automation.tool_name == "play"

@@ -13,6 +13,7 @@ from miku_on_desk.config.settings import (
     HookServerConfig,
     ImageGenerationConfig,
     LongTaskConfig,
+    McpAutomationConfig,
     McpServerConfig,
     McpTransport,
     MemoryTuningConfig,
@@ -509,6 +510,42 @@ def test_mcp_server_config_remote_transport_roundtrip_through_save_and_load(
     assert server.url == "https://example.com/mcp"
     assert server.headers == {"Authorization": "Bearer abc123"}
     assert server.command is None
+
+
+def test_mcp_automation_config_defaults_to_disabled_session_start() -> None:
+    config = McpAutomationConfig()
+
+    assert config.enabled is False
+    assert config.trigger_event == "SessionStart"
+    assert config.server_name == ""
+    assert config.tool_name == ""
+    assert config.tool_input == {}
+
+
+def test_app_settings_mcp_automation_roundtrip_through_save_and_load(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        mcp_automation=McpAutomationConfig(
+            enabled=True,
+            trigger_event="UserPromptSubmit",
+            server_name="spotify",
+            tool_name="play",
+            tool_input={"uri": "spotify:track:123"},
+        )
+    )
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded == settings
+    automation = loaded.mcp_automation
+    assert automation.enabled is True
+    assert automation.trigger_event == "UserPromptSubmit"
+    assert automation.server_name == "spotify"
+    assert automation.tool_name == "play"
+    assert automation.tool_input == {"uri": "spotify:track:123"}
 
 
 def test_acp_agent_config_timeout_s_defaults_to_none() -> None:

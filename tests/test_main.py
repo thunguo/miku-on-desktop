@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from qfluentwidgets import CaptionLabel
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
+from miku_on_desk.brain.mcp_automation import McpAutomationTrigger
 from miku_on_desk.brain.memory.models import Entity, Fact
 from miku_on_desk.brain.memory.system import default_memory_system
 from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
@@ -35,19 +36,25 @@ from miku_on_desk.config.settings import (
     BrainResilienceConfig,
     EnvBootstrap,
     HookServerConfig,
+    McpAutomationConfig,
     ModelTier,
     PersonaConfig,
     ProviderConfig,
     ShortcutsConfig,
     TTSConfig,
     TTSProviderName,
+    WindowConfig,
 )
 from miku_on_desk.face.character_voice import PetVoiceConfig, save_pet_voice_config
 from miku_on_desk.face.hooks.bridge import HookEventBus
+from miku_on_desk.face.hooks.schema import HookEvent
+from miku_on_desk.face.relationship_store import RelationshipStore
 from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, CharacterStandTile
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.face.ui.speech_controller import SpeechController, _SynthWorker
 from miku_on_desk.main import (
+    _VISITOR_MAX_INTERVAL_S,
+    _VISITOR_MIN_INTERVAL_S,
     PetActions,
     _append_reminder,
     _build_identity_prompt,
@@ -56,15 +63,20 @@ from miku_on_desk.main import (
     _format_agents_summary,
     _format_core_memory,
     _format_memory_index,
+    _maybe_queue_mcp_automation_trigger,
+    _on_character_switched,
     _open_character_clone_dialog,
     _open_character_creation_dialog,
+    _open_character_gallery,
     _open_memory_panel,
     _open_voice_change_dialog,
     _rebase_history,
     _resolve_speech_controller_for_settings,
     _run_brain_thread,
     _shortcut_bindings,
+    _show_visitor_overlay,
     _start_hook_server,
+    _start_visitor_scheduler,
     _startup_health_warnings,
     _sync_agent_profiles,
 )
@@ -741,3 +753,143 @@ def test_build_tray_icon_toggling_proactive_action_invokes_callback(
     _find_proactive_action(menu).trigger()
 
     assert toggled == [True]
+
+
+def test_on_character_switched_bumps_relationship_store(qapp: QApplication, tmp_path: Path) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    window = OverlayWindow(pet_dir)
+    window.show()
+    store = RelationshipStore(tmp_path / "character_relationships.json")
+
+    _on_character_switched(pet_dir, window, settings_path, relationship_store=store)
+    _on_character_switched(pet_dir, window, settings_path, relationship_store=store)
+
+    assert store.get("pet_a") == 2
+
+
+def test_on_character_switched_without_relationship_store_does_not_raise(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    window = OverlayWindow(pet_dir)
+    window.show()
+
+    _on_character_switched(pet_dir, window, settings_path)
+
+    assert AppSettings.load(settings_path).window.pet_dir == pet_dir
+
+
+def test_open_character_gallery_threads_relationship_store_into_switch(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    old_pet_dir = _make_pet_dir(assets_pets_dir, "old_pet")
+    new_pet_dir = _make_pet_dir(assets_pets_dir, "new_pet")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=old_pet_dir)).save(settings_path)
+    window = OverlayWindow(old_pet_dir)
+    window.show()
+    store = RelationshipStore(tmp_path / "character_relationships.json")
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        panel = _open_character_gallery(window, settings_path, [], relationship_store=store)
+        panel.character_switched.emit(new_pet_dir)
+
+    assert store.get("new_pet") == 1
+
+
+def test_show_visitor_overlay_skips_current_character(qapp: QApplication, tmp_path: Path) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    current_pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    other_pet_dir = _make_pet_dir(assets_pets_dir, "pet_b")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=current_pet_dir)).save(settings_path)
+    window = OverlayWindow(current_pet_dir)
+    window.show()
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        overlay = _show_visitor_overlay(window, settings_path)
+
+    assert overlay is not None
+    assert overlay._sprite._meta.pet_name == other_pet_dir.name
+    overlay.close()
+
+
+def test_show_visitor_overlay_returns_none_with_only_one_character(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    only_pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=only_pet_dir)).save(settings_path)
+    window = OverlayWindow(only_pet_dir)
+    window.show()
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        overlay = _show_visitor_overlay(window, settings_path)
+
+    assert overlay is None
+
+
+def test_start_visitor_scheduler_reschedules_after_firing(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    _make_pet_dir(assets_pets_dir, "pet_b")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=pet_dir)).save(settings_path)
+    window = OverlayWindow(pet_dir)
+    window.show()
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        timer = _start_visitor_scheduler(window, settings_path)
+        assert timer.isActive() is True
+        assert _VISITOR_MIN_INTERVAL_S * 1000 <= timer.interval() <= _VISITOR_MAX_INTERVAL_S * 1000
+
+        timer.timeout.emit()
+
+    assert timer.isActive() is True
+    assert _VISITOR_MIN_INTERVAL_S * 1000 <= timer.interval() <= _VISITOR_MAX_INTERVAL_S * 1000
+
+
+def test_maybe_queue_mcp_automation_trigger_enqueues_when_enabled_and_event_matches() -> None:
+    automation = McpAutomationConfig(enabled=True, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="SessionStart")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    queued = chat_input.get_nowait()
+    assert isinstance(queued, McpAutomationTrigger)
+    assert queued.hook_event_name == "SessionStart"
+
+
+def test_maybe_queue_mcp_automation_trigger_skips_when_disabled() -> None:
+    automation = McpAutomationConfig(enabled=False, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="SessionStart")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    assert chat_input.empty()
+
+
+def test_maybe_queue_mcp_automation_trigger_skips_when_event_does_not_match() -> None:
+    automation = McpAutomationConfig(enabled=True, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="UserPromptSubmit")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    assert chat_input.empty()

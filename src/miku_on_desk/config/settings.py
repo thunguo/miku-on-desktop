@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from platformdirs import PlatformDirs
 from pydantic import BaseModel, Field
@@ -124,6 +124,21 @@ class McpServerConfig(BaseModel):
     trusted: bool = False
     """用户显式标记为可信时，豁免该 server 桥接工具的 `requires_confirmation`——但不豁免
     路径沙箱/先读后改这两条结构性边界，见 `brain/mcp/host.py::_infer_policy_spec`。"""
+
+
+class McpAutomationConfig(BaseModel):
+    """检测到指定 hook 事件时自动触发一次预配置的 MCP 工具调用（跨系统联动示例）。
+
+    ``server_name``/``tool_name`` 与真实 MCP server 名/工具名对应，拼接规则见
+    `brain/mcp_automation.py::build_automation_tool_use`；若拼错或目标 server 未连接，
+    该次调用会被 `ToolRegistry.evaluate()` 判定为 DENY，不需要在这里做额外校验。
+    """
+
+    enabled: bool = False
+    trigger_event: str = "SessionStart"
+    server_name: str = ""
+    tool_name: str = ""
+    tool_input: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentProfileConfig(BaseModel):
@@ -369,6 +384,7 @@ class AppSettings(BaseModel):
     model_router: ModelRouterConfig = Field(default_factory=ModelRouterConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
+    mcp_automation: McpAutomationConfig = Field(default_factory=McpAutomationConfig)
     skills_dir: Path | None = None
     memory_dir: Path | None = None
     agent_profiles: list[AgentProfileConfig] = Field(default_factory=list)
