@@ -144,11 +144,16 @@ def _parse_emotional_updates(text: str) -> list[tuple[str, Any, float]]:
         updates = data.get("updates", [])
         if not isinstance(updates, list):
             return []
-        return [
-            (row["path"], row["value"], float(row.get("confidence", 0.7)))
-            for row in updates
-            if isinstance(row, dict) and row.get("path")
-        ]
+        parsed_updates: list[tuple[str, Any, float]] = []
+        for row in updates:
+            if not isinstance(row, dict) or not row.get("path") or "value" not in row:
+                continue
+            try:
+                confidence = float(row.get("confidence", 0.7))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            parsed_updates.append((row["path"], row["value"], confidence))
+        return parsed_updates
     except (json.JSONDecodeError, AttributeError, TypeError, KeyError):
         return []
 
