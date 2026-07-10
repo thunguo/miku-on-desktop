@@ -94,12 +94,13 @@ def retrieve_hints(
     emotional: EmotionalStore,
     query: str,
     limit: int = 5,
+    min_confidence: float = _MIN_CONFIDENCE,
 ) -> list[RetrievedMemoryHint]:
     """轻量三路检索：语义事实 + 情景标题摘要 + 情感偏好，按此优先级截断到 `limit` 条。"""
     active_facts = [
         fact
         for fact in semantic.search_facts(query, limit=_CANDIDATE_FETCH_LIMIT)
-        if fact.status == "active"
+        if fact.status == "active" and fact.confidence > min_confidence
     ]
     hints = [
         RetrievedMemoryHint(label="语义", text=f"{fact.subject}{fact.predicate}{fact.object}")

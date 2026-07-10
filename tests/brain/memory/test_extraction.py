@@ -15,7 +15,7 @@ import pytest
 from miku_on_desk.brain.memory.base_store import BaseStore
 from miku_on_desk.brain.memory.emotional_store import EmotionalStore
 from miku_on_desk.brain.memory.episodic_store import EpisodicStore
-from miku_on_desk.brain.memory.extraction import run_extractions
+from miku_on_desk.brain.memory.extraction import _parse_emotional_updates, run_extractions
 from miku_on_desk.brain.memory.models import MemoryUnit
 from miku_on_desk.brain.memory.semantic_store import SemanticStore
 from miku_on_desk.brain.model_router import ModelRouter
@@ -57,7 +57,7 @@ class _RoutingFakeProvider(Provider):
             episodic, default=StreamResult(success=True, content='{"title": "", "summary": ""}')
         )
         self._emotional = _as_list(
-            emotional, default=StreamResult(success=True, content='{"updates": {}}')
+            emotional, default=StreamResult(success=True, content='{"updates": []}')
         )
         self._semantic_calls = 0
         self._episodic_calls = 0
@@ -317,7 +317,10 @@ async def test_run_extractions_merges_emotional_updates_by_dotted_path(
     provider = _RoutingFakeProvider(
         emotional=StreamResult(
             success=True,
-            content='{"updates": {"location_preferences.familiar_cities": ["上海"]}}',
+            content=(
+                '{"updates": [{"path": "location_preferences.familiar_cities", '
+                '"value": ["上海"], "confidence": 0.9}]}'
+            ),
         )
     )
     router = _make_router()
@@ -365,6 +368,53 @@ async def test_run_extractions_skips_emotional_write_when_no_updates(
     )
 
     assert emotional.load_preferences()["last_updated"] == ""
+
+
+async def test_run_extractions_writes_only_updates_meeting_confidence_threshold(
+    base: BaseStore,
+    semantic: SemanticStore,
+    episodic: EpisodicStore,
+    emotional: EmotionalStore,
+    tmp_path: Path,
+) -> None:
+    units = _append_turn(base, session_id="s1", occurred_at="2026-07-06T09:00:00+00:00")
+    provider = _RoutingFakeProvider(
+        emotional=StreamResult(
+            success=True,
+            content=(
+                '{"updates": ['
+                '{"path": "location_preferences.familiar_cities", "value": ["上海"], '
+                '"confidence": 0.9}, '
+                '{"path": "habits.sleep_schedule", "value": "熬夜", "confidence": 0.3}'
+                "]}"
+            ),
+        )
+    )
+    router = _make_router()
+
+    await run_extractions(
+        base=base,
+        semantic=semantic,
+        episodic=episodic,
+        emotional=emotional,
+        root=tmp_path,
+        session_id="s1",
+        units=units,
+        router=router,
+        providers={ProviderName.ANTHROPIC: provider},
+        now="2026-07-06T09:00:00+00:00",
+        emotional_confidence_threshold=0.75,
+    )
+
+    preferences = emotional.load_preferences()
+    assert preferences["location_preferences"]["familiar_cities"] == ["上海"]
+    assert "habits" not in preferences
+
+
+def test_parse_emotional_updates_rejects_legacy_dict_format() -> None:
+    legacy = '{"updates": {"location_preferences.familiar_cities": ["上海"]}}'
+
+    assert _parse_emotional_updates(legacy) == []
 
 
 # ── 情景批量触发 ─────────────────────────────────────────────────────────

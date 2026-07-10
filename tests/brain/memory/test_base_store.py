@@ -200,6 +200,33 @@ def test_find_semantically_similar_returns_matches_above_threshold(store: BaseSt
     assert "c" not in similar_ids
 
 
+def test_find_semantically_similar_with_session_id_restricts_scope_to_session(
+    store: BaseStore,
+) -> None:
+    store.append(_unit(unit_id="a", session_id="s1", content="今天天气真好适合出门散步"))
+    store.append(_unit(unit_id="b", session_id="s2", content="今天天气真好适合出门散步呀"))
+    query = _unit(unit_id="q", session_id="s1", content="今天天气真好适合出门散步")
+
+    similar = store.find_semantically_similar(query, threshold=0.5, session_id="s1")
+
+    similar_ids = [unit_id for unit_id, _score in similar]
+    assert similar_ids == ["a"]
+
+
+def test_find_semantically_similar_without_session_id_still_scans_all_sessions(
+    store: BaseStore,
+) -> None:
+    store.append(_unit(unit_id="a", session_id="s1", content="今天天气真好适合出门散步"))
+    store.append(_unit(unit_id="b", session_id="s2", content="今天天气真好适合出门散步呀"))
+    query = _unit(unit_id="q", session_id="s1", content="今天天气真好适合出门散步")
+
+    similar = store.find_semantically_similar(query, threshold=0.5)
+
+    similar_ids = [unit_id for unit_id, _score in similar]
+    assert "a" in similar_ids
+    assert "b" in similar_ids
+
+
 # ── consolidation 时间戳 ──────────────────────────────────────────────────
 
 

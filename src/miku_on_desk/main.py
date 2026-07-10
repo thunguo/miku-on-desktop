@@ -243,6 +243,7 @@ async def _run_extraction_safely(
             units=units,
             router=router,
             providers=providers,
+            emotional_confidence_threshold=memory_system.tuning.emotional_confidence_threshold,
         )
     except Exception:
         logger.exception("后台记忆提取管线异常，跳过")
@@ -793,9 +794,7 @@ def _open_voice_change_dialog(
     dialog = VoiceChangeDialog(pet_dir, settings_path, vault=vault)
 
     def _on_voice_updated(changed_dir: Path) -> None:
-        _apply_pet_voice_if_active(
-            changed_dir, settings_path, speech_controller, vault=vault
-        )
+        _apply_pet_voice_if_active(changed_dir, settings_path, speech_controller, vault=vault)
         gallery_panel.refresh()
 
     dialog.voice_updated.connect(_on_voice_updated)
@@ -1105,4 +1104,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

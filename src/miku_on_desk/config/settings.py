@@ -180,10 +180,11 @@ class BrainResilienceConfig(BaseModel):
 class MemoryTuningConfig(BaseModel):
     """记忆检索/整理/屏幕匹配相关阈值，默认值与原硬编码常量一致。
 
-    多数字段目前只被生产代码里已有的活跃调用链（compaction/screen_analyze）消费；
-    ``retrieval_min_confidence``/``base_similarity_threshold``/
-    ``emotional_confidence_threshold`` 对应的方法当前没有生产调用点（仅测试直接调用），
-    先做成可配置项，供未来接入真实调用路径时复用。
+    ``retrieval_min_confidence`` 接入 `recall` 工具与每轮系统提示拼装共用的
+    `retrieval.retrieve_hints()`；``base_similarity_threshold`` 接入
+    `MemorySystem.add_memory_unit()` 写入热路径（比较范围收窄到同会话内，命中只记日志，
+    不跳过写入）；``emotional_confidence_threshold`` 接入情感抽取管线，过滤掉 LLM 给出的
+    低置信度偏好更新。
     """
 
     retrieval_min_confidence: float = 0.7

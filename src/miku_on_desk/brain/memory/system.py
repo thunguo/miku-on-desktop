@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ from miku_on_desk.brain.memory.episodic_store import EpisodicStore
 from miku_on_desk.brain.memory.models import Fact, MemoryUnit, RetrievedMemoryHint
 from miku_on_desk.brain.memory.semantic_store import SemanticStore
 from miku_on_desk.config.settings import EnvBootstrap, MemoryTuningConfig
+
+logger = logging.getLogger(__name__)
 
 _REMEMBER_SUBJECT = "user"
 _REMEMBER_EXTRACTED_BY = "tool:remember"
@@ -60,7 +63,14 @@ class MemorySystem:
             default_confidence_threshold=self._tuning.emotional_confidence_threshold,
         )
 
+    @property
+    def tuning(self) -> MemoryTuningConfig:
+        return self._tuning
+
     def add_memory_unit(self, unit: MemoryUnit) -> str:
+        similar = self.base.find_semantically_similar(unit, session_id=unit.session_id)
+        if similar:
+            logger.debug("疑似重复记忆单元 %s，同会话内命中 %d 条相似记录", unit.id, len(similar))
         return self.base.append(unit)
 
     def remember(self, key: str, value: str) -> None:
@@ -96,6 +106,7 @@ class MemorySystem:
             emotional=self.emotional,
             query=query,
             limit=limit,
+            min_confidence=self._tuning.retrieval_min_confidence,
         )
         remaining = limit - len(hints)
         if remaining > 0:
@@ -112,6 +123,7 @@ class MemorySystem:
             emotional=self.emotional,
             query=query,
             limit=limit,
+            min_confidence=self._tuning.retrieval_min_confidence,
         )
 
     def retrieve(self, query: str, token_budget: int = 2000) -> str:
