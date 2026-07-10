@@ -283,10 +283,9 @@ class CharacterGalleryPanel(QWidget):
         else:
             self._empty_label.hide()
 
+        familiarity_map = self._relationship_store.load() if self._relationship_store else {}
         for index, (pet_dir, meta) in enumerate(characters):
-            familiarity = (
-                self._relationship_store.get(pet_dir.name) if self._relationship_store else 0
-            )
+            familiarity = familiarity_map.get(pet_dir.name, 0)
             tile = CharacterStandTile(
                 pet_dir,
                 meta,
