@@ -1158,6 +1158,36 @@ def test_context_menu_chat_popup_routes_to_queue_message_when_busy(
     assert talked == []
 
 
+def test_chat_popup_barge_in_requested_stops_speech_and_requests_cancel(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+
+    requested: list[None] = []
+    gate = CancellationGate()
+    monkeypatch.setattr(gate, "request_stop", lambda: requested.append(None))
+    speech_controller = Mock()
+    window = _make_window(tmp_path, cancellation_gate=gate, speech_controller=speech_controller)
+
+    window._show_chat_popup(QPoint(10, 10))
+    created_popups[0].barge_in_requested.emit()
+
+    assert requested == [None]
+    speech_controller.stop.assert_called_once_with()
+
+
+def test_chat_popup_barge_in_requested_without_gates_is_noop(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+    window = _make_window(tmp_path)
+
+    window._show_chat_popup(QPoint(10, 10))
+    created_popups[0].barge_in_requested.emit()
+
+
 def test_set_pet_dir_replaces_sprite_widget_and_resets_state_machine(
     qapp: QApplication, tmp_path: Path
 ) -> None:

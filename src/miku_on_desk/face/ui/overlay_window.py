@@ -554,6 +554,12 @@ class OverlayWindow(QWidget):
             self._speech_controller.stop()
         self._stop_button.setEnabled(False)
 
+    def _on_barge_in_requested(self) -> None:
+        if self._cancellation_gate is not None:
+            self._cancellation_gate.request_stop()
+        if self._speech_controller is not None:
+            self._speech_controller.stop()
+
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         self._state_machine.trigger_transient(PetState.CLICKED, t=self._elapsed())
         if self._actions is None:
@@ -571,6 +577,7 @@ class OverlayWindow(QWidget):
     def _show_chat_popup(self, global_pos: QPoint) -> None:
         popup = ChatPopup(self, voice_capture=self._voice_capture, stt_worker=self._stt_worker)
         popup.text_submitted.connect(self._route_chat_text)
+        popup.barge_in_requested.connect(self._on_barge_in_requested)
         popup.popup_at(global_pos)
 
     def _route_chat_text(self, text: str) -> None:
