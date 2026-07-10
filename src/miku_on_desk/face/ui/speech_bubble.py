@@ -12,7 +12,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontDatabase, QPainter, QPainterPath, QPaintEvent, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from miku_on_desk.face.ui.theme import PINK_ACCENT, TEAL_DARK, TEAL_MAIN, qcolor
 
@@ -26,6 +34,13 @@ _BUTTON_ROW_SPACING = 8
 _WIDGET_STYLE = f"""
 QLabel {{
     color: #1a1a1a;
+    background: transparent;
+}}
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea > QWidget > QWidget {{
     background: transparent;
 }}
 QPushButton {{
@@ -71,10 +86,27 @@ class SpeechBubble(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet(_WIDGET_STYLE)
 
-        self._label = QLabel(self)
+        self._label = QLabel()
         self._label.setWordWrap(True)
         self._label.setTextFormat(Qt.TextFormat.PlainText)
         self._label.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self._label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+
+        # 文本放进可滚动视口而非直接塞进气泡：气泡高度被夹在 _MAX_BUBBLE_HEIGHT，超出这个
+        # 上限的长回复以前会被 QLabel 直接裁掉（且从顶部裁，最新/结尾内容反而看不到）。改成
+        # QScrollArea 后超长内容仍可滚动查看，并靠下面的 rangeChanged→贴底逻辑保证流式追加
+        # 时始终显示到最后一行。
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidget(self._label)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.viewport().setAutoFillBackground(False)
+        scrollbar = self._scroll.verticalScrollBar()
+        # 内容高度变化（流式追加/整段替换）时把滚动条钉到底——展示以“最后的消息”为准。
+        # 流式结束后不再触发 rangeChanged，用户可自由上滚回看更早内容。
+        scrollbar.rangeChanged.connect(lambda _minimum, maximum: scrollbar.setValue(maximum))
 
         self._yes_button = QPushButton("是", self)
         self._no_button = QPushButton("否", self)
@@ -86,7 +118,7 @@ class SpeechBubble(QWidget):
             _CONTENT_MARGIN, _CONTENT_MARGIN, _CONTENT_MARGIN, _CONTENT_MARGIN
         )
         layout.setSpacing(_BUTTON_ROW_SPACING)
-        layout.addWidget(self._label)
+        layout.addWidget(self._scroll)
         button_row = QHBoxLayout()
         button_row.addWidget(self._yes_button)
         button_row.addWidget(self._no_button)
