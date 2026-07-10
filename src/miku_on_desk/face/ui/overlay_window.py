@@ -212,6 +212,11 @@ class OverlayWindow(QWidget):
 
         self._confirmation_gate = confirmation_gate
         self._speech_controller = speech_controller
+        self._audio_level = 0.0
+        self._talking_segment_started_at: float | None = None
+        self._talking_active_elapsed = 0.0
+        self._talking_last_tick_t = 0.0
+        self._connect_speech_controller_audio_level(speech_controller)
         self._voice_capture = voice_capture
         self._stt_worker = stt_worker
         self._session_tracker = SessionTracker()
@@ -268,13 +273,41 @@ class OverlayWindow(QWidget):
     def _elapsed(self) -> float:
         return time.monotonic() - self._start_time
 
+    def _connect_speech_controller_audio_level(
+        self, speech_controller: SpeechController | None
+    ) -> None:
+        if speech_controller is not None:
+            speech_controller.audio_level_changed.connect(self._on_audio_level_changed)
+
+    def _on_audio_level_changed(self, level: float) -> None:
+        self._audio_level = level
+
+    def _advance_talking_elapsed(self, t: float, entered_at: float) -> float:
+        """把 TALKING 帧号推进的"经过时间"从墙钟时间换成"响度加权的有效播放时间"：
+        响度 0（静音/没有语音功能）时完全不推进，帧定格在当前一帧；响度 1 时按精灵表
+        原始 fps 正常循环；中间值按比例放慢，不会比原速更快。
+        """
+        if entered_at != self._talking_segment_started_at:
+            self._talking_segment_started_at = entered_at
+            self._talking_active_elapsed = 0.0
+            self._talking_last_tick_t = t
+            return 0.0
+        dt = t - self._talking_last_tick_t
+        self._talking_last_tick_t = t
+        self._talking_active_elapsed += dt * self._audio_level
+        return self._talking_active_elapsed
+
     def _on_animation_tick(self) -> None:
         t = self._elapsed()
         state = self._state_machine.current_state(t)
         entered_at = self._state_machine.state_entered_at(t)
         info = self._meta.states.get(state, self._meta.states[self._meta.fallback_state])
+        if state == PetState.TALKING and self._speech_controller is not None:
+            elapsed_in_state = self._advance_talking_elapsed(t, entered_at)
+        else:
+            elapsed_in_state = t - entered_at
         frame = frame_index(
-            t - entered_at, fps=info.fps, frame_count=info.frame_count, loop=info.loop
+            elapsed_in_state, fps=info.fps, frame_count=info.frame_count, loop=info.loop
         )
         self._sprite_widget.set_frame(state, frame)
 
@@ -526,7 +559,10 @@ class OverlayWindow(QWidget):
         这个属性是构造时赋值一次的普通属性，不像 ``main()`` 里的同名局部变量能靠闭包后绑定
         自动生效，需要显式同步。
         """
+        if self._speech_controller is not None:
+            self._speech_controller.audio_level_changed.disconnect(self._on_audio_level_changed)
         self._speech_controller = speech_controller
+        self._connect_speech_controller_audio_level(speech_controller)
 
     def set_voice_input(
         self, voice_capture: PcmAudioCapture | None, stt_worker: SttWorker | None

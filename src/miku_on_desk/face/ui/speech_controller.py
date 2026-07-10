@@ -32,6 +32,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QIODevice, QObject, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import (
     QAudioFormat,
@@ -49,6 +50,8 @@ logger = logging.getLogger(__name__)
 _DRIP_INTERVAL_MS = 25
 _PREBUFFER_SECONDS = 0.15
 _BYTES_PER_SAMPLE = 2  # 16-bit PCM
+_RMS_FULL_SCALE = 4000.0  # 经验满量程：TTS 语音真实 RMS 通常只有 int16 满量程的 10%-15%
+_MP3_FALLBACK_LEVEL = 0.7  # mp3 路径无法解码，用固定值代表"播放中"
 
 
 class _SynthWorker(QThread):
@@ -96,12 +99,15 @@ class _SynthWorker(QThread):
 class SpeechController(QObject):
     """UI 线程上的语音控制器：喂文本进来，它负责断句、后台合成、实时播放。"""
 
+    audio_level_changed = Signal(float)
+
     def __init__(self, provider: TTSProvider, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._buffer = SentenceBuffer()
         self._generation = 0
         self._next_seq = 0
         self._pending_sentences = 0
+        self._audio_level = 0.0
 
         # PCM 播放路径的状态；_pcm_format 为 None 时表示当前 provider 不支持裸 PCM，
         # 走下面的 mp3 兜底路径。
@@ -176,6 +182,7 @@ class SpeechController(QObject):
         if self._current is not None:
             self._unlink(self._current)
             self._current = None
+        self._set_audio_level(0.0)
 
     def close(self) -> None:
         """退出时调用：停止 worker 线程与播放，清理临时文件。"""
@@ -246,10 +253,31 @@ class SpeechController(QObject):
         free = sink.bytesFree()
         if free > 0 and self._backlog:
             n = min(free, len(self._backlog))
-            device.write(bytes(self._backlog[:n]))
+            chunk = bytes(self._backlog[:n])
+            device.write(chunk)
             del self._backlog[:n]
+            self._set_audio_level(self._pcm_rms_level(chunk))
         if not self._backlog and self._pending_sentences == 0:
             self._drip_timer.stop()
+            self._set_audio_level(0.0)
+
+    # ---- 响度 ----
+
+    def _set_audio_level(self, level: float) -> None:
+        level = max(0.0, min(1.0, level))
+        if level == self._audio_level:
+            return
+        self._audio_level = level
+        self.audio_level_changed.emit(level)
+
+    @staticmethod
+    def _pcm_rms_level(chunk: bytes) -> float:
+        usable = len(chunk) - (len(chunk) % 2)
+        if usable <= 0:
+            return 0.0
+        samples = np.frombuffer(chunk[:usable], dtype=np.int16)
+        rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+        return min(1.0, rms / _RMS_FULL_SCALE)
 
     # ---- 信号回调 ----
 
@@ -300,6 +328,7 @@ class SpeechController(QObject):
         self._playing = True
         self._player.setSource(QUrl.fromLocalFile(str(self._current)))
         self._player.play()
+        self._set_audio_level(_MP3_FALLBACK_LEVEL)
 
     def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
         if status in (
@@ -322,6 +351,8 @@ class SpeechController(QObject):
             self._unlink(self._current)
             self._current = None
         self._pump()
+        if not self._playing:
+            self._set_audio_level(0.0)
 
     @staticmethod
     def _unlink(path: Path) -> None:
