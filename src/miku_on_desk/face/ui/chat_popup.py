@@ -75,6 +75,10 @@ class ChatPopup(QWidget):
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # 关闭即销毁而非仅隐藏：overlay_window 每次弹出都新建一个实例（为拿到最新语音输入
+        # 配置），若关闭只是 hide，被父窗口持有的旧实例会不断堆积占内存；配合 overlay 侧的
+        # “弹新的前先关旧的”去重，保证屏幕上同时至多一个输入框。
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         width = _WIDTH + _MIC_BUTTON_SIZE + 8 if has_voice_input else _WIDTH
         self.resize(width, _HEIGHT)
 
