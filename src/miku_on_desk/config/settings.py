@@ -239,9 +239,14 @@ class PersonaConfig(BaseModel):
 
 class ProactiveConfig(BaseModel):
     """主动交互：定时/不定时地根据屏幕内容主动搭话。改动后需重启应用生效，
-    与其余设置项（如 persona/model_router）的既有行为一致，不做热重载。"""
+    与其余设置项（如 persona/model_router）的既有行为一致，不做热重载。
 
-    enabled: bool = False
+    ``enabled`` 默认开启：因为 ``AppSettings.save()`` 会显式写出每个字段的当前值，
+    这次翻转只影响从未生成过 ``settings.json`` 的全新安装，已经保存过偏好的存量用户
+    不受影响。运行时还可以用系统托盘图标菜单的"主动交互"勾选项一键暂停/恢复，那是
+    session 级、不写回这里的临时开关，与这个默认值互不影响。"""
+
+    enabled: bool = True
     min_interval_s: int = 600
     max_interval_s: int = 1800
     idle_threshold_s: int = 120

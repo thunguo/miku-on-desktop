@@ -655,6 +655,13 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         container = QWidget(self)
         form = QFormLayout(container)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow(
+            CaptionLabel(
+                "默认开启；可通过系统托盘图标菜单一键暂停/恢复（仅本次运行生效，不影响这里"
+                "保存的设置）；不会做连续签到或讨要回应式的追问。",
+                container,
+            )
+        )
         form.addRow(self._proactive_enabled_box)
         form.addRow("最小间隔（秒）", self._proactive_min_interval_edit)
         self._proactive_min_interval_warning = self._add_numeric_validation(

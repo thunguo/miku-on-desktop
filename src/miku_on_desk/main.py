@@ -49,7 +49,12 @@ from miku_on_desk.brain.memory import extraction
 from miku_on_desk.brain.memory.models import Entity, Fact, MemoryUnit, MemoryUnitRole
 from miku_on_desk.brain.memory.system import MemorySystem, default_memory_system
 from miku_on_desk.brain.model_router import ModelRouter
-from miku_on_desk.brain.proactive import ProactiveTrigger, run_proactive_scheduler
+from miku_on_desk.brain.proactive import (
+    ProactiveToggleRequest,
+    ProactiveTrigger,
+    apply_proactive_toggle,
+    run_proactive_scheduler,
+)
 from miku_on_desk.brain.prompt.frozen_system import FrozenSystemSections, build_frozen_system
 from miku_on_desk.brain.prompt.reminder import build_system_reminder, host_shell_descriptor
 from miku_on_desk.brain.provider_factory import build_providers
@@ -280,7 +285,9 @@ def _format_proactive_observation(observation: str) -> str:
     return (
         f"[主动观察] 你注意到：{observation}\n"
         "如果合适，用你的人格风格主动跟用户搭句话、给点反馈或者问要不要帮忙；如果这个"
-        "时机其实不太合适开口，可以只做很轻的一句话，不要生硬。"
+        "时机其实不太合适开口，可以只做很轻的一句话，不要生硬。说完这一句就好，不要因为"
+        "用户没有立刻回应就继续追问或流露被忽视的情绪——这不是签到，不需要等对方回应"
+        "才算完成。"
     )
 
 
@@ -402,6 +409,17 @@ async def _brain_main(
             item = await asyncio.to_thread(chat_input.get)
             if item is _SHUTDOWN:
                 break
+            if isinstance(item, ProactiveToggleRequest):
+                proactive_task = await apply_proactive_toggle(
+                    item,
+                    proactive_task,
+                    config=settings.proactive,
+                    router=router,
+                    providers=providers,
+                    backend=backend,
+                    chat_input=chat_input,
+                )
+                continue
             if isinstance(item, ProactiveTrigger):
                 rebase_text = _format_proactive_observation(item.observation)
                 await _save_memory_unit(
@@ -624,6 +642,7 @@ class PetActions:
     open_memory: Callable[[], MemoryPanel]
     open_characters: Callable[[], CharacterGalleryPanel]
     open_recollections: Callable[[], RecollectionGalleryPanel]
+    toggle_proactive: Callable[[bool], None]
     quit: Callable[[], None]
 
 
@@ -917,6 +936,7 @@ def _build_tray_icon(
     *,
     voice_capture: PcmAudioCapture | None = None,
     stt_worker: SttWorker | None = None,
+    proactive_enabled: bool = False,
 ) -> tuple[QSystemTrayIcon, QMenu]:
     icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
     tray = QSystemTrayIcon(icon, app)
@@ -949,6 +969,12 @@ def _build_tray_icon(
     memory_action = QAction("记忆管理…", menu)
     memory_action.triggered.connect(actions.open_memory)
     menu.addAction(memory_action)
+
+    proactive_action = QAction("主动交互", menu)
+    proactive_action.setCheckable(True)
+    proactive_action.setChecked(proactive_enabled)
+    proactive_action.toggled.connect(actions.toggle_proactive)
+    menu.addAction(proactive_action)
 
     menu.addSeparator()
 
@@ -1064,6 +1090,7 @@ def main() -> None:
             window, settings_path, open_windows, vault=vault, speech_controller=speech_controller
         ),
         open_recollections=lambda: _open_recollection_gallery(memory_system, open_windows),
+        toggle_proactive=lambda enabled: chat_input.put(ProactiveToggleRequest(enabled=enabled)),
         quit=_on_quit,
     )
 
@@ -1102,7 +1129,11 @@ def main() -> None:
     hotkey_manager.rebind(_shortcut_bindings(settings.shortcuts))
 
     tray, _tray_menu = _build_tray_icon(
-        app, actions, voice_capture=voice_capture, stt_worker=stt_worker
+        app,
+        actions,
+        voice_capture=voice_capture,
+        stt_worker=stt_worker,
+        proactive_enabled=settings.proactive.enabled,
     )
     tray.show()
 

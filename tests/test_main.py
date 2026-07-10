@@ -13,7 +13,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from qfluentwidgets import CaptionLabel
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
@@ -47,8 +48,10 @@ from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, Charac
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.face.ui.speech_controller import SpeechController, _SynthWorker
 from miku_on_desk.main import (
+    PetActions,
     _append_reminder,
     _build_identity_prompt,
+    _build_tray_icon,
     _extract_assistant_text,
     _format_agents_summary,
     _format_core_memory,
@@ -342,7 +345,6 @@ def test_run_brain_thread_emits_brain_crashed_when_brain_main_raises(
     assert captured == [BrainCrashed(error="炸了")]
 
 
-
 def test_run_brain_thread_restarts_after_transient_crash_and_recovers(
     qapp: QApplication,
 ) -> None:
@@ -390,9 +392,7 @@ def test_run_brain_thread_gives_up_after_exhausting_restart_budget(
         enabled=True, max_restart_attempts=3, base_delay_s=0.0, max_delay_s=0.0
     )
 
-    with patch(
-        "miku_on_desk.main._brain_main", side_effect=RuntimeError("持续崩溃")
-    ):
+    with patch("miku_on_desk.main._brain_main", side_effect=RuntimeError("持续崩溃")):
         thread = threading.Thread(
             target=_run_brain_thread,
             kwargs={
@@ -435,9 +435,7 @@ def test_run_brain_thread_resets_restart_budget_after_stable_run(
     )
     monotonic_values = iter([0.0, 1.0, 2.0, 100.0, 101.0, 102.0])
 
-    with patch(
-        "miku_on_desk.main._brain_main", side_effect=RuntimeError("崩溃")
-    ):
+    with patch("miku_on_desk.main._brain_main", side_effect=RuntimeError("崩溃")):
         thread = threading.Thread(
             target=_run_brain_thread,
             kwargs={
@@ -557,7 +555,6 @@ def test_shortcut_bindings_maps_action_names_to_configured_sequences() -> None:
     }
 
 
-
 class _FakeTTSProvider:
     pcm_format = None
 
@@ -653,9 +650,7 @@ def test_start_hook_server_installs_claude_code_by_default(tmp_path: Path) -> No
         patch("miku_on_desk.main.install_codex") as install_codex,
         patch("miku_on_desk.main.install_gemini") as install_gemini,
     ):
-        _start_hook_server(
-            HookServerConfig(), EnvBootstrap(data_dir=tmp_path), HookEventBus()
-        )
+        _start_hook_server(HookServerConfig(), EnvBootstrap(data_dir=tmp_path), HookEventBus())
 
     install_claude.assert_called_once()
     install_codex.assert_not_called()
@@ -697,3 +692,52 @@ def test_start_hook_server_claude_code_install_failure_does_not_block_others(
     assert result is not None
     install_codex.assert_called_once()
 
+
+def _make_pet_actions(**overrides: object) -> PetActions:
+    defaults: dict[str, object] = {
+        "talk": lambda text: None,
+        "queue_message": lambda text: None,
+        "open_settings": lambda: None,
+        "open_memory": lambda: None,
+        "open_characters": lambda: None,
+        "open_recollections": lambda: None,
+        "toggle_proactive": lambda enabled: None,
+        "quit": lambda: None,
+    }
+    defaults.update(overrides)
+    return PetActions(**defaults)  # type: ignore[arg-type]
+
+
+def _find_proactive_action(menu: QMenu) -> QAction:
+    for action in menu.actions():
+        if action.text() == "主动交互":
+            return action
+    raise AssertionError("未找到「主动交互」托盘菜单项")
+
+
+def test_build_tray_icon_proactive_action_reflects_initial_enabled_state(
+    qapp: QApplication,
+) -> None:
+    _tray, menu = _build_tray_icon(qapp, _make_pet_actions(), proactive_enabled=True)
+
+    assert _find_proactive_action(menu).isChecked() is True
+
+
+def test_build_tray_icon_proactive_action_reflects_initial_disabled_state(
+    qapp: QApplication,
+) -> None:
+    _tray, menu = _build_tray_icon(qapp, _make_pet_actions(), proactive_enabled=False)
+
+    assert _find_proactive_action(menu).isChecked() is False
+
+
+def test_build_tray_icon_toggling_proactive_action_invokes_callback(
+    qapp: QApplication,
+) -> None:
+    toggled: list[bool] = []
+    actions = _make_pet_actions(toggle_proactive=toggled.append)
+    _tray, menu = _build_tray_icon(qapp, actions, proactive_enabled=False)
+
+    _find_proactive_action(menu).trigger()
+
+    assert toggled == [True]

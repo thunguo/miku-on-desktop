@@ -1103,6 +1103,7 @@ def test_context_menu_wires_radial_menu_signals_to_actions(
         open_memory=lambda: memory_calls.append(None),
         open_characters=lambda: characters_calls.append(None),
         open_recollections=lambda: recollection_calls.append(None),
+        toggle_proactive=lambda enabled: None,
         quit=lambda: quit_calls.append(None),
     )
     window = _make_window(tmp_path, actions=actions)
@@ -1147,6 +1148,7 @@ def test_context_menu_chat_popup_routes_to_queue_message_when_busy(
         open_memory=lambda: None,  # type: ignore[arg-type]
         open_characters=lambda: None,  # type: ignore[arg-type]
         open_recollections=lambda: None,  # type: ignore[arg-type]
+        toggle_proactive=lambda enabled: None,
         quit=lambda: None,
     )
     window = _make_window(tmp_path, actions=actions)

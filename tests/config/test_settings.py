@@ -196,10 +196,10 @@ def test_app_settings_persona_roundtrip_through_save_and_load(tmp_path: Path) ->
     assert loaded.persona == settings.persona
 
 
-def test_proactive_config_defaults_to_disabled() -> None:
+def test_proactive_config_defaults_to_enabled() -> None:
     proactive = ProactiveConfig()
 
-    assert proactive.enabled is False
+    assert proactive.enabled is True
     assert proactive.min_interval_s == 600
     assert proactive.max_interval_s == 1800
     assert proactive.idle_threshold_s == 120
@@ -281,9 +281,7 @@ def test_save_settings_with_vault_stores_tts_api_key_in_vault_not_on_disk(
 ) -> None:
     settings_path = tmp_path / "settings.json"
     settings = AppSettings()
-    settings.tts = TTSConfig(
-        enabled=True, provider=TTSProviderName.OPENAI, api_key="sk-tts-plain"
-    )
+    settings.tts = TTSConfig(enabled=True, provider=TTSProviderName.OPENAI, api_key="sk-tts-plain")
 
     vault = _make_vault(tmp_path)
     try:
