@@ -58,6 +58,10 @@ def resolve_transition(event_name: str) -> Transition | None:
     return _EVENT_TRANSITIONS.get(event_name)
 
 
+def known_event_names() -> list[str]:
+    return list(_EVENT_TRANSITIONS)
+
+
 class HookEvent(BaseModel):
     """一次外部 hook 通知，字段是本项目自定义的规整形状，不追求与调用方原始 payload
     字节级一致——``raw`` 保留完整原始 JSON，供将来对接真实 Claude Code 时按需调整

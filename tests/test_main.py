@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from qfluentwidgets import CaptionLabel
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
+from miku_on_desk.brain.mcp_automation import McpAutomationTrigger
 from miku_on_desk.brain.memory.models import Entity, Fact
 from miku_on_desk.brain.memory.system import default_memory_system
 from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
@@ -35,6 +36,7 @@ from miku_on_desk.config.settings import (
     BrainResilienceConfig,
     EnvBootstrap,
     HookServerConfig,
+    McpAutomationConfig,
     ModelTier,
     PersonaConfig,
     ProviderConfig,
@@ -45,6 +47,7 @@ from miku_on_desk.config.settings import (
 )
 from miku_on_desk.face.character_voice import PetVoiceConfig, save_pet_voice_config
 from miku_on_desk.face.hooks.bridge import HookEventBus
+from miku_on_desk.face.hooks.schema import HookEvent
 from miku_on_desk.face.relationship_store import RelationshipStore
 from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, CharacterStandTile
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
@@ -60,6 +63,7 @@ from miku_on_desk.main import (
     _format_agents_summary,
     _format_core_memory,
     _format_memory_index,
+    _maybe_queue_mcp_automation_trigger,
     _on_character_switched,
     _open_character_clone_dialog,
     _open_character_creation_dialog,
@@ -857,3 +861,35 @@ def test_start_visitor_scheduler_reschedules_after_firing(
 
     assert timer.isActive() is True
     assert _VISITOR_MIN_INTERVAL_S * 1000 <= timer.interval() <= _VISITOR_MAX_INTERVAL_S * 1000
+
+
+def test_maybe_queue_mcp_automation_trigger_enqueues_when_enabled_and_event_matches() -> None:
+    automation = McpAutomationConfig(enabled=True, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="SessionStart")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    queued = chat_input.get_nowait()
+    assert isinstance(queued, McpAutomationTrigger)
+    assert queued.hook_event_name == "SessionStart"
+
+
+def test_maybe_queue_mcp_automation_trigger_skips_when_disabled() -> None:
+    automation = McpAutomationConfig(enabled=False, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="SessionStart")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    assert chat_input.empty()
+
+
+def test_maybe_queue_mcp_automation_trigger_skips_when_event_does_not_match() -> None:
+    automation = McpAutomationConfig(enabled=True, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="UserPromptSubmit")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    assert chat_input.empty()

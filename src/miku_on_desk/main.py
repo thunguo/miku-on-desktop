@@ -43,9 +43,11 @@ from miku_on_desk.brain.loop import (
     LoopConfig,
     LoopResult,
     LoopStopReason,
+    resolve_tool_call,
     run_ai_loop,
 )
 from miku_on_desk.brain.mcp.host import MCPHost
+from miku_on_desk.brain.mcp_automation import McpAutomationTrigger, build_automation_tool_use
 from miku_on_desk.brain.memory import extraction
 from miku_on_desk.brain.memory.models import Entity, Fact, MemoryUnit, MemoryUnitRole
 from miku_on_desk.brain.memory.system import MemorySystem, default_memory_system
@@ -88,6 +90,7 @@ from miku_on_desk.config import (
     AppSettings,
     EnvBootstrap,
     HookServerConfig,
+    McpAutomationConfig,
     ModelTier,
     PersonaConfig,
     ProviderName,
@@ -107,6 +110,7 @@ from miku_on_desk.face.hooks.installer import (
     install_codex,
     install_gemini,
 )
+from miku_on_desk.face.hooks.schema import HookEvent
 from miku_on_desk.face.hooks.server import PET_EVENT_PATH, HookServer
 from miku_on_desk.face.hooks.session_report import GrowthStore
 from miku_on_desk.face.relationship_store import RelationshipStore
@@ -421,6 +425,16 @@ async def _brain_main(
                     providers=providers,
                     backend=backend,
                     chat_input=chat_input,
+                )
+                continue
+            if isinstance(item, McpAutomationTrigger):
+                tool_use = build_automation_tool_use(settings.mcp_automation)
+                await resolve_tool_call(
+                    tool_use,
+                    registry=registry,
+                    session_id=session_id,
+                    callbacks=callbacks,
+                    round=0,
                 )
                 continue
             if isinstance(item, ProactiveTrigger):
@@ -1014,6 +1028,16 @@ def _shortcut_bindings(shortcuts: ShortcutsConfig) -> dict[str, str]:
     }
 
 
+def _maybe_queue_mcp_automation_trigger(
+    event: HookEvent,
+    *,
+    automation: McpAutomationConfig,
+    chat_input: queue.Queue[object],
+) -> None:
+    if automation.enabled and event.event == automation.trigger_event:
+        chat_input.put(McpAutomationTrigger(hook_event_name=event.event))
+
+
 def _build_tray_icon(
     app: QApplication,
     actions: PetActions,
@@ -1095,6 +1119,14 @@ def main() -> None:
 
     hook_bus = HookEventBus()
     hook_server = _start_hook_server(settings.hook_server, bootstrap, hook_bus)
+
+    def _on_hook_event_for_automation(event: HookEvent) -> None:
+        _maybe_queue_mcp_automation_trigger(
+            event, automation=settings.mcp_automation, chat_input=chat_input
+        )
+
+    hook_bus.hook_event.connect(_on_hook_event_for_automation)
+
     growth_store = GrowthStore(bootstrap.resolve_data_dir() / "companion_growth.json")
     relationship_store = RelationshipStore(
         bootstrap.resolve_data_dir() / "character_relationships.json"

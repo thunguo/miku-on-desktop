@@ -172,7 +172,7 @@ _VERIFY_BEFORE_DONE_TEXT = (
 )
 
 
-async def _resolve_tool_call(
+async def resolve_tool_call(
     tool_use: ToolUseBlock,
     *,
     registry: ToolRegistry,
@@ -526,7 +526,7 @@ async def run_ai_loop(
             logger.info("ai_loop progress_checkin session_id=%s round=%d", session_id, rounds)
 
         tool_results = [
-            await _resolve_tool_call(
+            await resolve_tool_call(
                 tool_use,
                 registry=registry,
                 session_id=session_id,

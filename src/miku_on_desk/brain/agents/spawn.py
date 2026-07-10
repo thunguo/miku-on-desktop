@@ -12,7 +12,7 @@
 在安全边界内收尾、真正跑满整个外层超时的极端情况，才会走到 `cancel()` 丢弃内容这条路。
 
 sub-agent 的确认回调永远自动批准（`_auto_approve`），这只绕过 policy 的 ASK 档——DENY 档（危险
-命令正则、路径沙箱越界等结构性拒绝）完全不受影响，见 `loop.py` 里 `_resolve_tool_call` 的
+命令正则、路径沙箱越界等结构性拒绝）完全不受影响，见 `loop.py` 里 `resolve_tool_call` 的
 DENY/ASK 分支：DENY 从不调用 `confirm`。sub-agent 天生跑在无人值守的后台，没有 UI 可以弹确认框，
 所以只有需要人工判断的 ASK 档才适合自动放行。
 
