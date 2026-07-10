@@ -182,7 +182,7 @@ class _CreateCharacterTile(QWidget):
 
 
 class _CloneCharacterTile(QWidget):
-    """ "＋ 克隆"格，视觉上与 ``_CreateCharacterTile`` 完全一致，虚线边框区分于普通角色展台。"""
+    """＋ 克隆格，视觉上与 ``_CreateCharacterTile`` 完全一致，虚线边框区分于普通角色展台。"""
 
     clicked = Signal()
 
