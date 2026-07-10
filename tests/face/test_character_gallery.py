@@ -103,9 +103,7 @@ def test_on_switch_requested_updates_current_and_emits_character_switched(
     assert panel._current_pet_dir == pet_b
 
 
-def test_on_character_created_sets_current_and_reloads(
-    qapp: QApplication, tmp_path: Path
-) -> None:
+def test_on_character_created_sets_current_and_reloads(qapp: QApplication, tmp_path: Path) -> None:
     assets_dir = tmp_path / "assets_pets"
     assets_dir.mkdir()
     pet_a = _make_character_dir(assets_dir, "pet_a")

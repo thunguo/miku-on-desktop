@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 import queue
+import random
 import sys
 import threading
 import time
@@ -22,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -108,11 +109,12 @@ from miku_on_desk.face.hooks.installer import (
 )
 from miku_on_desk.face.hooks.server import PET_EVENT_PATH, HookServer
 from miku_on_desk.face.hooks.session_report import GrowthStore
+from miku_on_desk.face.relationship_store import RelationshipStore
 from miku_on_desk.face.stt_worker import SttWorker
 from miku_on_desk.face.ui.audio_capture import PcmAudioCapture
 from miku_on_desk.face.ui.character_clone_dialog import CharacterCloneDialog
 from miku_on_desk.face.ui.character_creation_dialog import CharacterCreationDialog
-from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel
+from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, discover_pet_dirs
 from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.global_hotkeys import GlobalHotKeyManager
 from miku_on_desk.face.ui.memory_panel import MemoryPanel
@@ -121,6 +123,7 @@ from miku_on_desk.face.ui.recollection_gallery import RecollectionGalleryPanel
 from miku_on_desk.face.ui.settings_panel import SettingsPanel
 from miku_on_desk.face.ui.speech_controller import SpeechController
 from miku_on_desk.face.ui.theme import apply_fluent_theme
+from miku_on_desk.face.ui.visitor_overlay import VisitorOverlay
 from miku_on_desk.face.ui.voice_change_dialog import VoiceChangeDialog
 from miku_on_desk.hands_eyes.backend import create_platform_backend
 
@@ -754,6 +757,7 @@ def _on_character_switched(
     *,
     speech_controller: SpeechController | None = None,
     vault: SecretVault | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> None:
     window.set_pet_dir(pet_dir)
     current_settings = (
@@ -765,6 +769,8 @@ def _on_character_switched(
     else:
         current_settings.save(settings_path)
     _apply_pet_voice_if_active(pet_dir, settings_path, speech_controller, vault=vault)
+    if relationship_store is not None:
+        relationship_store.bump(pet_dir.name)
 
 
 def _open_character_creation_dialog(
@@ -775,12 +781,18 @@ def _open_character_creation_dialog(
     *,
     vault: SecretVault | None = None,
     speech_controller: SpeechController | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> CharacterCreationDialog:
     dialog = CharacterCreationDialog(_assets_pets_dir(), settings_path, vault=vault)
 
     def _on_created(pet_dir: Path) -> None:
         _on_character_switched(
-            pet_dir, window, settings_path, speech_controller=speech_controller, vault=vault
+            pet_dir,
+            window,
+            settings_path,
+            speech_controller=speech_controller,
+            vault=vault,
+            relationship_store=relationship_store,
         )
         gallery_panel.on_character_created(pet_dir)
 
@@ -798,12 +810,18 @@ def _open_character_clone_dialog(
     *,
     vault: SecretVault | None = None,
     speech_controller: SpeechController | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> CharacterCloneDialog:
     dialog = CharacterCloneDialog(_assets_pets_dir(), settings_path, vault=vault)
 
     def _on_created(pet_dir: Path) -> None:
         _on_character_switched(
-            pet_dir, window, settings_path, speech_controller=speech_controller, vault=vault
+            pet_dir,
+            window,
+            settings_path,
+            speech_controller=speech_controller,
+            vault=vault,
+            relationship_store=relationship_store,
         )
         gallery_panel.on_character_created(pet_dir)
 
@@ -841,14 +859,22 @@ def _open_character_gallery(
     *,
     vault: SecretVault | None = None,
     speech_controller: SpeechController | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> CharacterGalleryPanel:
     current_settings = AppSettings.load(settings_path)
     pet_dir = current_settings.window.pet_dir or _default_pet_dir()
-    panel = CharacterGalleryPanel(_assets_pets_dir(), pet_dir)
+    panel = CharacterGalleryPanel(
+        _assets_pets_dir(), pet_dir, relationship_store=relationship_store
+    )
     panel.setWindowTitle("角色画廊")
     panel.character_switched.connect(
         lambda new_pet_dir: _on_character_switched(
-            new_pet_dir, window, settings_path, speech_controller=speech_controller, vault=vault
+            new_pet_dir,
+            window,
+            settings_path,
+            speech_controller=speech_controller,
+            vault=vault,
+            relationship_store=relationship_store,
         )
     )
     panel.create_requested.connect(
@@ -859,6 +885,7 @@ def _open_character_gallery(
             open_windows,
             vault=vault,
             speech_controller=speech_controller,
+            relationship_store=relationship_store,
         )
     )
     panel.clone_requested.connect(
@@ -869,6 +896,7 @@ def _open_character_gallery(
             open_windows,
             vault=vault,
             speech_controller=speech_controller,
+            relationship_store=relationship_store,
         )
     )
     panel.voice_change_requested.connect(
@@ -884,6 +912,62 @@ def _open_character_gallery(
     open_windows.append(panel)
     panel.show()
     return panel
+
+
+_VISITOR_MIN_INTERVAL_S = 300
+_VISITOR_MAX_INTERVAL_S = 900
+_VISITOR_OFFSET_X = 20
+_GENERIC_GREETINGS = [
+    "路过打个招呼～",
+    "咦，你也在这里呀！",
+    "今天也要加油哦～",
+    "偷偷看了一下，继续忙你的吧！",
+    "嗨～只是想说一声你好。",
+]
+
+
+def _show_visitor_overlay(
+    window: OverlayWindow,
+    settings_path: Path,
+    *,
+    vault: SecretVault | None = None,
+) -> VisitorOverlay | None:
+    """随机挑一个非当前角色，在主窗口旁弹出一句纯装饰性问候，不驱动关系数据。"""
+    current_settings = (
+        load_settings_with_vault(settings_path, vault) if vault else AppSettings.load(settings_path)
+    )
+    current_pet_dir = current_settings.window.pet_dir or _default_pet_dir()
+    candidates = [
+        (pet_dir, meta)
+        for pet_dir, meta in discover_pet_dirs(_assets_pets_dir())
+        if pet_dir.name != current_pet_dir.name
+    ]
+    if not candidates:
+        return None
+    pet_dir, meta = random.choice(candidates)
+    greeting = random.choice(_GENERIC_GREETINGS)
+    x = window.x() + window.width() + _VISITOR_OFFSET_X
+    y = window.y()
+    return VisitorOverlay(pet_dir, meta, greeting, x, y)
+
+
+def _start_visitor_scheduler(
+    window: OverlayWindow,
+    settings_path: Path,
+    *,
+    vault: SecretVault | None = None,
+) -> QTimer:
+    """用单发定时器循环重新调度访客弹窗，每次触发后随机取 5-15 分钟之间的新间隔。"""
+    timer = QTimer(window)
+    timer.setSingleShot(True)
+
+    def _fire() -> None:
+        _show_visitor_overlay(window, settings_path, vault=vault)
+        timer.start(random.randint(_VISITOR_MIN_INTERVAL_S, _VISITOR_MAX_INTERVAL_S) * 1000)
+
+    timer.timeout.connect(_fire)
+    timer.start(random.randint(_VISITOR_MIN_INTERVAL_S, _VISITOR_MAX_INTERVAL_S) * 1000)
+    return timer
 
 
 def _startup_health_warnings(settings: AppSettings, bootstrap: EnvBootstrap) -> list[str]:
@@ -1012,6 +1096,9 @@ def main() -> None:
     hook_bus = HookEventBus()
     hook_server = _start_hook_server(settings.hook_server, bootstrap, hook_bus)
     growth_store = GrowthStore(bootstrap.resolve_data_dir() / "companion_growth.json")
+    relationship_store = RelationshipStore(
+        bootstrap.resolve_data_dir() / "character_relationships.json"
+    )
 
     memory_system = default_memory_system(
         settings.memory_dir, bootstrap, tuning=settings.memory_tuning
@@ -1087,7 +1174,12 @@ def main() -> None:
         open_settings=_open_settings,
         open_memory=lambda: _open_memory_panel(memory_system, open_windows),
         open_characters=lambda: _open_character_gallery(
-            window, settings_path, open_windows, vault=vault, speech_controller=speech_controller
+            window,
+            settings_path,
+            open_windows,
+            vault=vault,
+            speech_controller=speech_controller,
+            relationship_store=relationship_store,
         ),
         open_recollections=lambda: _open_recollection_gallery(memory_system, open_windows),
         toggle_proactive=lambda enabled: chat_input.put(ProactiveToggleRequest(enabled=enabled)),
@@ -1136,6 +1228,8 @@ def main() -> None:
         proactive_enabled=settings.proactive.enabled,
     )
     tray.show()
+
+    _visitor_timer = _start_visitor_scheduler(window, settings_path, vault=vault)
 
     health_warnings = _startup_health_warnings(settings, bootstrap)
     if health_warnings:
