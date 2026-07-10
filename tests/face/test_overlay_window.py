@@ -140,9 +140,7 @@ def test_acp_chunk_received_appends_to_bubble_with_agent_prefix(
     assert window._bubble.current_text() == "\n[claude-code] 正在重构"
 
 
-def test_acp_chunk_received_reprefixes_on_agent_switch(
-    qapp: QApplication, tmp_path: Path
-) -> None:
+def test_acp_chunk_received_reprefixes_on_agent_switch(qapp: QApplication, tmp_path: Path) -> None:
     bus = BrainEventBus()
     window = _make_window(tmp_path, event_bus=bus)
 
@@ -274,9 +272,7 @@ def test_loop_finished_hides_progress_label_even_without_matching_tool_result(
 
     bus.emit_event(ToolUseStarted(tool_use))
     bus.emit_event(
-        LoopFinished(
-            LoopResult(stop_reason=LoopStopReason.USER_CANCELLED, messages=[], rounds=0)
-        )
+        LoopFinished(LoopResult(stop_reason=LoopStopReason.USER_CANCELLED, messages=[], rounds=0))
     )
 
     assert window._progress_label.isVisibleTo(window) is False
@@ -466,9 +462,7 @@ def test_loop_finished_without_error_resets_baseline_to_idle(
     assert window._state_machine.current_state(window._elapsed()) == PetState.IDLE
 
 
-def test_loop_finished_resets_acp_agent_prefix_tracking(
-    qapp: QApplication, tmp_path: Path
-) -> None:
+def test_loop_finished_resets_acp_agent_prefix_tracking(qapp: QApplication, tmp_path: Path) -> None:
     bus = BrainEventBus()
     window = _make_window(tmp_path, event_bus=bus)
     bus.emit_event(AcpChunkReceived(agent="claude-code", text="任务一"))
@@ -544,9 +538,7 @@ def test_loop_finished_after_confirmation_requested_clears_stale_confirmation_bu
     assert window._bubble.is_awaiting_confirmation() is True
 
     bus.emit_event(
-        LoopFinished(
-            LoopResult(stop_reason=LoopStopReason.USER_CANCELLED, messages=[], rounds=0)
-        )
+        LoopFinished(LoopResult(stop_reason=LoopStopReason.USER_CANCELLED, messages=[], rounds=0))
     )
 
     assert window._bubble.is_awaiting_confirmation() is False
@@ -1050,9 +1042,7 @@ def test_loop_finished_clears_pending_click_target_unconditionally(
     bus.emit_event(ConfirmationRequested("r1", tool_use, None))
     assert window._pending_click_target is not None
 
-    bus.emit_event(
-        LoopFinished(LoopResult(stop_reason=LoopStopReason.DONE, messages=[], rounds=1))
-    )
+    bus.emit_event(LoopFinished(LoopResult(stop_reason=LoopStopReason.DONE, messages=[], rounds=1)))
 
     assert window._pending_click_target is None
     assert window._pending_click_tool_use_id is None
@@ -1071,9 +1061,7 @@ def test_idle_wander_resumes_after_pending_click_target_cleared(
     bus.emit_event(ConfirmationRequested("r1", tool_use, None))
     window._on_animation_tick()
 
-    bus.emit_event(
-        LoopFinished(LoopResult(stop_reason=LoopStopReason.DONE, messages=[], rounds=1))
-    )
+    bus.emit_event(LoopFinished(LoopResult(stop_reason=LoopStopReason.DONE, messages=[], rounds=1)))
     origin_x = window.x()
 
     clock["t"] = 1.0
@@ -1105,6 +1093,7 @@ def test_context_menu_wires_radial_menu_signals_to_actions(
     queued: list[str] = []
     settings_calls: list[None] = []
     memory_calls: list[None] = []
+    recollection_calls: list[None] = []
     characters_calls: list[None] = []
     quit_calls: list[None] = []
     actions = PetActions(
@@ -1113,6 +1102,7 @@ def test_context_menu_wires_radial_menu_signals_to_actions(
         open_settings=lambda: settings_calls.append(None),
         open_memory=lambda: memory_calls.append(None),
         open_characters=lambda: characters_calls.append(None),
+        open_recollections=lambda: recollection_calls.append(None),
         quit=lambda: quit_calls.append(None),
     )
     window = _make_window(tmp_path, actions=actions)
@@ -1123,12 +1113,14 @@ def test_context_menu_wires_radial_menu_signals_to_actions(
     menu = created_menus[0]
     menu.settings_requested.emit()
     menu.memory_requested.emit()
+    menu.recollections_requested.emit()
     menu.characters_requested.emit()
     menu.quit_requested.emit()
     menu.talk_requested.emit()
 
     assert settings_calls == [None]
     assert memory_calls == [None]
+    assert recollection_calls == [None]
     assert characters_calls == [None]
     assert quit_calls == [None]
     assert len(created_popups) == 1
@@ -1154,6 +1146,7 @@ def test_context_menu_chat_popup_routes_to_queue_message_when_busy(
         open_settings=lambda: None,  # type: ignore[arg-type]
         open_memory=lambda: None,  # type: ignore[arg-type]
         open_characters=lambda: None,  # type: ignore[arg-type]
+        open_recollections=lambda: None,  # type: ignore[arg-type]
         quit=lambda: None,
     )
     window = _make_window(tmp_path, actions=actions)
@@ -1214,7 +1207,6 @@ def test_set_pet_dir_replaces_sprite_widget_and_resets_state_machine(
     assert window._sprite_widget is not original_sprite_widget
     assert window._sprite_widget.width() == other_frame_size
     assert window.width() == other_frame_size
-
 
 
 def test_set_speech_controller_replaces_internal_reference(
@@ -1333,4 +1325,3 @@ def test_stop_button_and_progress_label_have_non_empty_stylesheets(
 
     assert window._stop_button.styleSheet().strip() != ""
     assert window._progress_label.styleSheet().strip() != ""
-

@@ -606,6 +606,7 @@ class OverlayWindow(QWidget):
         menu.talk_requested.connect(lambda: self._show_chat_popup(global_pos))
         menu.settings_requested.connect(actions.open_settings)
         menu.memory_requested.connect(actions.open_memory)
+        menu.recollections_requested.connect(actions.open_recollections)
         menu.characters_requested.connect(actions.open_characters)
         menu.quit_requested.connect(actions.quit)
         menu.popup_at(global_pos)

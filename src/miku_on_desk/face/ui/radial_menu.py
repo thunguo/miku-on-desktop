@@ -27,6 +27,7 @@ class _Sector(Enum):
     TALK = auto()
     SETTINGS = auto()
     MEMORY = auto()
+    RECOLLECTIONS = auto()
     CHARACTERS = auto()
     QUIT = auto()
 
@@ -35,6 +36,7 @@ _SECTOR_ORDER = [
     _Sector.TALK,
     _Sector.SETTINGS,
     _Sector.MEMORY,
+    _Sector.RECOLLECTIONS,
     _Sector.CHARACTERS,
     _Sector.QUIT,
 ]
@@ -42,6 +44,7 @@ _SECTOR_LABELS = {
     _Sector.TALK: "对miku说",
     _Sector.SETTINGS: "设置",
     _Sector.MEMORY: "记忆管理",
+    _Sector.RECOLLECTIONS: "回忆相册",
     _Sector.CHARACTERS: "角色生成",
     _Sector.QUIT: "退出",
 }
@@ -57,6 +60,7 @@ class RadialMenu(QWidget):
     talk_requested = Signal()
     settings_requested = Signal()
     memory_requested = Signal()
+    recollections_requested = Signal()
     characters_requested = Signal()
     quit_requested = Signal()
 
@@ -106,6 +110,8 @@ class RadialMenu(QWidget):
             self.settings_requested.emit()
         elif sector is _Sector.MEMORY:
             self.memory_requested.emit()
+        elif sector is _Sector.RECOLLECTIONS:
+            self.recollections_requested.emit()
         elif sector is _Sector.CHARACTERS:
             self.characters_requested.emit()
         elif sector is _Sector.QUIT:

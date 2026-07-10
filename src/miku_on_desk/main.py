@@ -112,6 +112,7 @@ from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.global_hotkeys import GlobalHotKeyManager
 from miku_on_desk.face.ui.memory_panel import MemoryPanel
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
+from miku_on_desk.face.ui.recollection_gallery import RecollectionGalleryPanel
 from miku_on_desk.face.ui.settings_panel import SettingsPanel
 from miku_on_desk.face.ui.speech_controller import SpeechController
 from miku_on_desk.face.ui.theme import apply_fluent_theme
@@ -622,6 +623,7 @@ class PetActions:
     open_settings: Callable[[], SettingsPanel]
     open_memory: Callable[[], MemoryPanel]
     open_characters: Callable[[], CharacterGalleryPanel]
+    open_recollections: Callable[[], RecollectionGalleryPanel]
     quit: Callable[[], None]
 
 
@@ -642,6 +644,16 @@ def _open_settings_panel(
 def _open_memory_panel(memory_system: MemorySystem, open_windows: list[QWidget]) -> MemoryPanel:
     panel = MemoryPanel(memory_system)
     panel.setWindowTitle("记忆管理")
+    open_windows.append(panel)
+    panel.show()
+    return panel
+
+
+def _open_recollection_gallery(
+    memory_system: MemorySystem, open_windows: list[QWidget]
+) -> RecollectionGalleryPanel:
+    panel = RecollectionGalleryPanel(memory_system)
+    panel.setWindowTitle("回忆相册")
     open_windows.append(panel)
     panel.show()
     return panel
@@ -1051,6 +1063,7 @@ def main() -> None:
         open_characters=lambda: _open_character_gallery(
             window, settings_path, open_windows, vault=vault, speech_controller=speech_controller
         ),
+        open_recollections=lambda: _open_recollection_gallery(memory_system, open_windows),
         quit=_on_quit,
     )
 
