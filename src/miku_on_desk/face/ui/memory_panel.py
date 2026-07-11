@@ -47,6 +47,7 @@ _ENTITY_TYPES: list[EntityType] = [
 ]
 _MANUAL_EXTRACTED_BY = "tool:remember"
 _DATA_ROLE = int(Qt.ItemDataRole.UserRole)
+_MAX_DUPLICATE_SCAN_UNITS = 200
 
 
 def _populate_semantic_tree(tree: TreeWidget, facts: list[Fact]) -> None:
@@ -173,8 +174,53 @@ def _confirm_delete(parent: QWidget, name: str) -> bool:
     return bool(box.exec())
 
 
+def _count_duplicate_groups(system: MemorySystem) -> int:
+    """统计疑似重复组数，并为避免 UI 卡顿仅扫描前 N 条 base 记录。"""
+    units = system.base.list_units()
+    if len(units) > _MAX_DUPLICATE_SCAN_UNITS:
+        units = units[:_MAX_DUPLICATE_SCAN_UNITS]
+    visited: set[str] = set()
+    groups = 0
+    for unit in units:
+        if unit.id in visited:
+            continue
+        visited.add(unit.id)
+        similar = system.base.find_semantically_similar(unit)
+        if similar:
+            groups += 1
+            visited.update(other_id for other_id, _score in similar)
+    return groups
+
+
+def _render_diagnostics(system: MemorySystem) -> str:
+    tuning = system.tuning
+    active_facts = system.semantic.list_facts(status="active")
+    base_unit_count = len(system.base.list_units())
+    duplicate_groups = _count_duplicate_groups(system)
+    duplicate_groups_line = f"疑似重复记忆组数（全库扫描）：{duplicate_groups}"
+    if base_unit_count > _MAX_DUPLICATE_SCAN_UNITS:
+        duplicate_groups_line = (
+            f"{duplicate_groups_line}（基于前 {_MAX_DUPLICATE_SCAN_UNITS} 条记录的顺序截断结果）"
+        )
+    filtered_count = sum(
+        1 for fact in active_facts if not (fact.confidence > tuning.retrieval_min_confidence)
+    )
+    lines = [
+        f"检索置信度阈值（retrieval_min_confidence）：{tuning.retrieval_min_confidence:.2f}",
+        f"写入相似度阈值（base_similarity_threshold）：{tuning.base_similarity_threshold:.2f}",
+        f"情感置信度阈值（emotional_confidence_threshold）："
+        f"{tuning.emotional_confidence_threshold:.2f}",
+        "",
+        f"活跃语义事实总数：{len(active_facts)}",
+        f"其中会被检索阈值过滤掉的条数：{filtered_count}",
+        f"base 层原始记录总数：{base_unit_count}",
+        duplicate_groups_line,
+    ]
+    return "\n".join(lines)
+
+
 class MemoryPanel(FluentWindow):  # type: ignore[misc]
-    """四个标签页各自独立操作对应的存储层，互不共享状态。"""
+    """五个标签页各自独立操作对应的存储层，互不共享状态。"""
 
     def __init__(self, memory_system: MemorySystem, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -184,12 +230,14 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
         episodic_tab = self._build_episodic_tab()
         emotional_tab = self._build_emotional_tab()
         base_tab = self._build_base_tab()
+        diagnostics_tab = self._build_diagnostics_tab()
 
         for widget, object_name in (
             (semantic_tab, "semanticTab"),
             (episodic_tab, "episodicTab"),
             (emotional_tab, "emotionalTab"),
             (base_tab, "baseTab"),
+            (diagnostics_tab, "diagnosticsTab"),
         ):
             widget.setObjectName(object_name)
 
@@ -197,6 +245,7 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
         self.addSubInterface(episodic_tab, FluentIcon.CALENDAR, "情景")
         self.addSubInterface(emotional_tab, FluentIcon.HEART, "情感")
         self.addSubInterface(base_tab, FluentIcon.MESSAGE, "原始会话")
+        self.addSubInterface(diagnostics_tab, FluentIcon.DEVELOPER_TOOLS, "诊断")
 
         self.resize(720, 560)
 
@@ -620,7 +669,6 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
             return
         self._base_units_view.setPlainText(_render_units(session_id, self._system))
 
-
     def _on_base_delete_clicked(self) -> None:
         session_id = self._selected_session_id()
         if session_id is None:
@@ -631,3 +679,23 @@ class MemoryPanel(FluentWindow):  # type: ignore[misc]
             return
         self._system.base.delete_session(session_id)
         self._refresh_base()
+
+    # ── 诊断 ─────────────────────────────────────────────────────────────
+
+    def _build_diagnostics_tab(self) -> QWidget:
+        container = QWidget(self)
+
+        self._diagnostics_view = PlainTextEdit(container)
+        self._diagnostics_view.setReadOnly(True)
+        self._diagnostics_view.setPlainText('点击"刷新诊断"查看当前记忆质量概况。')
+
+        refresh_button = PrimaryPushButton("刷新诊断", container)
+        refresh_button.clicked.connect(self._refresh_diagnostics)
+
+        layout = QVBoxLayout(container)
+        layout.addWidget(self._diagnostics_view)
+        layout.addWidget(refresh_button)
+        return container
+
+    def _refresh_diagnostics(self) -> None:
+        self._diagnostics_view.setPlainText(_render_diagnostics(self._system))

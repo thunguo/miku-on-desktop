@@ -11,6 +11,10 @@
 文档标注为"中等"档，静默自动发送有把误转写当用户原话发出去的风险。用户手动打字
 （``QLineEdit.textEdited``，只在真正键盘/粘贴输入时触发，程序调用 ``setText`` 不会触发）
 会立刻打断录音，避免"转写自动填入"和"用户正在编辑"互相打架。
+
+点击麦克风开始录音时会 emit ``barge_in_requested``——这是"点击麦克风即打断"的信号来源：
+本弹窗不直接持有取消生成/停止播放所需的对象，只负责在用户明确要开始说话的瞬间往上抛信号，
+交给持有这些对象的 ``OverlayWindow`` 处理。
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ class ChatPopup(QWidget):
     """默认隐藏；调用 ``popup_at`` 定位、显示并聚焦输入框。"""
 
     text_submitted = Signal(str)
+    barge_in_requested = Signal()
 
     def __init__(
         self,
@@ -168,6 +173,7 @@ class ChatPopup(QWidget):
     def _start_recording(self) -> None:
         if self._voice_capture is None or self._stt_worker is None:
             return
+        self.barge_in_requested.emit()
         self._committed_prefix = self._input.text()
         self._active_session_id = self._stt_worker.begin_session()
         self._voice_capture.start_capture()

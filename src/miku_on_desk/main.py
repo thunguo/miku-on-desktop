@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 import queue
+import random
 import sys
 import threading
 import time
@@ -22,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,14 +43,21 @@ from miku_on_desk.brain.loop import (
     LoopConfig,
     LoopResult,
     LoopStopReason,
+    resolve_tool_call,
     run_ai_loop,
 )
 from miku_on_desk.brain.mcp.host import MCPHost
+from miku_on_desk.brain.mcp_automation import McpAutomationTrigger, build_automation_tool_use
 from miku_on_desk.brain.memory import extraction
 from miku_on_desk.brain.memory.models import Entity, Fact, MemoryUnit, MemoryUnitRole
 from miku_on_desk.brain.memory.system import MemorySystem, default_memory_system
 from miku_on_desk.brain.model_router import ModelRouter
-from miku_on_desk.brain.proactive import ProactiveTrigger, run_proactive_scheduler
+from miku_on_desk.brain.proactive import (
+    ProactiveToggleRequest,
+    ProactiveTrigger,
+    apply_proactive_toggle,
+    run_proactive_scheduler,
+)
 from miku_on_desk.brain.prompt.frozen_system import FrozenSystemSections, build_frozen_system
 from miku_on_desk.brain.prompt.reminder import build_system_reminder, host_shell_descriptor
 from miku_on_desk.brain.provider_factory import build_providers
@@ -57,7 +65,9 @@ from miku_on_desk.brain.providers.base import Message, Provider, TextBlock
 from miku_on_desk.brain.secrets.vault import SecretVault, default_vault_paths
 from miku_on_desk.brain.skills.manager import default_skill_manager, register_skill_tool
 from miku_on_desk.brain.tools.builtin.computer_input import register_computer_input_tool
+from miku_on_desk.brain.tools.builtin.exec_command import register_exec_command_tool
 from miku_on_desk.brain.tools.builtin.express_reaction import register_express_reaction_tool
+from miku_on_desk.brain.tools.builtin.file_tools import register_file_tools
 from miku_on_desk.brain.tools.builtin.memory_tools import register_memory_tools
 from miku_on_desk.brain.tools.builtin.screen_analyze import register_screen_analyze_tool
 from miku_on_desk.brain.tools.path_sandbox import default_path_sandbox
@@ -80,6 +90,7 @@ from miku_on_desk.config import (
     AppSettings,
     EnvBootstrap,
     HookServerConfig,
+    McpAutomationConfig,
     ModelTier,
     PersonaConfig,
     ProviderName,
@@ -91,20 +102,32 @@ from miku_on_desk.config import (
 from miku_on_desk.config.logging_config import setup_logging
 from miku_on_desk.face.character_voice import resolve_tts_config_for_pet
 from miku_on_desk.face.hooks.bridge import HookEventBus
-from miku_on_desk.face.hooks.installer import default_claude_settings_path, install
+from miku_on_desk.face.hooks.installer import (
+    default_claude_settings_path,
+    default_codex_hooks_path,
+    default_gemini_settings_path,
+    install,
+    install_codex,
+    install_gemini,
+)
+from miku_on_desk.face.hooks.schema import HookEvent
 from miku_on_desk.face.hooks.server import PET_EVENT_PATH, HookServer
+from miku_on_desk.face.hooks.session_report import GrowthStore
+from miku_on_desk.face.relationship_store import RelationshipStore
 from miku_on_desk.face.stt_worker import SttWorker
 from miku_on_desk.face.ui.audio_capture import PcmAudioCapture
 from miku_on_desk.face.ui.character_clone_dialog import CharacterCloneDialog
 from miku_on_desk.face.ui.character_creation_dialog import CharacterCreationDialog
-from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel
+from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, discover_pet_dirs
 from miku_on_desk.face.ui.chat_popup import ChatPopup
 from miku_on_desk.face.ui.global_hotkeys import GlobalHotKeyManager
 from miku_on_desk.face.ui.memory_panel import MemoryPanel
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
+from miku_on_desk.face.ui.recollection_gallery import RecollectionGalleryPanel
 from miku_on_desk.face.ui.settings_panel import SettingsPanel
 from miku_on_desk.face.ui.speech_controller import SpeechController
 from miku_on_desk.face.ui.theme import apply_fluent_theme
+from miku_on_desk.face.ui.visitor_overlay import VisitorOverlay
 from miku_on_desk.face.ui.voice_change_dialog import VoiceChangeDialog
 from miku_on_desk.hands_eyes.backend import create_platform_backend
 
@@ -233,6 +256,7 @@ async def _run_extraction_safely(
             units=units,
             router=router,
             providers=providers,
+            emotional_confidence_threshold=memory_system.tuning.emotional_confidence_threshold,
         )
     except Exception:
         logger.exception("后台记忆提取管线异常，跳过")
@@ -268,7 +292,9 @@ def _format_proactive_observation(observation: str) -> str:
     return (
         f"[主动观察] 你注意到：{observation}\n"
         "如果合适，用你的人格风格主动跟用户搭句话、给点反馈或者问要不要帮忙；如果这个"
-        "时机其实不太合适开口，可以只做很轻的一句话，不要生硬。"
+        "时机其实不太合适开口，可以只做很轻的一句话，不要生硬。说完这一句就好，不要因为"
+        "用户没有立刻回应就继续追问或流露被忽视的情绪——这不是签到，不需要等对方回应"
+        "才算完成。"
     )
 
 
@@ -292,6 +318,8 @@ async def _brain_main(
     policy = default_policy_engine(settings.permissions, path_sandbox, read_tracker)
     registry = ToolRegistry(policy, read_tracker)
     register_express_reaction_tool(event_bus, registry)
+    register_file_tools(registry)
+    register_exec_command_tool(registry)
 
     await asyncio.to_thread(memory_system.base.start_session, session_id, "桌面对话")
     register_memory_tools(memory_system, registry)
@@ -388,6 +416,27 @@ async def _brain_main(
             item = await asyncio.to_thread(chat_input.get)
             if item is _SHUTDOWN:
                 break
+            if isinstance(item, ProactiveToggleRequest):
+                proactive_task = await apply_proactive_toggle(
+                    item,
+                    proactive_task,
+                    config=settings.proactive,
+                    router=router,
+                    providers=providers,
+                    backend=backend,
+                    chat_input=chat_input,
+                )
+                continue
+            if isinstance(item, McpAutomationTrigger):
+                tool_use = build_automation_tool_use(settings.mcp_automation)
+                await resolve_tool_call(
+                    tool_use,
+                    registry=registry,
+                    session_id=session_id,
+                    callbacks=callbacks,
+                    round=0,
+                )
+                continue
             if isinstance(item, ProactiveTrigger):
                 rebase_text = _format_proactive_observation(item.observation)
                 await _save_memory_unit(
@@ -561,17 +610,41 @@ def _start_hook_server(
     server.start()
 
     url = f"http://{config.host}:{server.port}{PET_EVENT_PATH}"
-    try:
-        install(
-            default_claude_settings_path(),
-            url=url,
-            token=server.token,
-            include_experimental=config.include_experimental,
-        )
-    except Exception:
-        # settings.json 格式异常或磁盘 I/O 失败都不能阻止 app 启动——hook 只是锦上添花的
-        # 视觉反馈，不是核心功能。
-        logger.exception("安装 Claude Code hook 失败，跳过")
+
+    # 三个 CLI 各自独立 try/except：某一个的配置文件格式异常或磁盘 I/O 失败，不能连带
+    # 影响其它 CLI 的安装，更不能阻止 app 启动——hook 只是锦上添花的视觉反馈，不是核心功能。
+    if config.install_claude_code:
+        try:
+            install(
+                default_claude_settings_path(),
+                url=url,
+                token=server.token,
+                include_experimental=config.include_experimental,
+            )
+        except Exception:
+            logger.exception("安装 Claude Code hook 失败，跳过")
+
+    if config.install_codex:
+        try:
+            install_codex(
+                default_codex_hooks_path(),
+                url=url,
+                token=server.token,
+                include_experimental=config.include_experimental,
+            )
+        except Exception:
+            logger.exception("安装 Codex CLI hook 失败，跳过")
+
+    if config.install_gemini_cli:
+        try:
+            install_gemini(
+                default_gemini_settings_path(),
+                url=url,
+                token=server.token,
+                include_experimental=config.include_experimental,
+            )
+        except Exception:
+            logger.exception("安装 Gemini CLI hook 失败，跳过")
 
     return server
 
@@ -585,6 +658,8 @@ class PetActions:
     open_settings: Callable[[], SettingsPanel]
     open_memory: Callable[[], MemoryPanel]
     open_characters: Callable[[], CharacterGalleryPanel]
+    open_recollections: Callable[[], RecollectionGalleryPanel]
+    toggle_proactive: Callable[[bool], None]
     quit: Callable[[], None]
 
 
@@ -605,6 +680,16 @@ def _open_settings_panel(
 def _open_memory_panel(memory_system: MemorySystem, open_windows: list[QWidget]) -> MemoryPanel:
     panel = MemoryPanel(memory_system)
     panel.setWindowTitle("记忆管理")
+    open_windows.append(panel)
+    panel.show()
+    return panel
+
+
+def _open_recollection_gallery(
+    memory_system: MemorySystem, open_windows: list[QWidget]
+) -> RecollectionGalleryPanel:
+    panel = RecollectionGalleryPanel(memory_system)
+    panel.setWindowTitle("回忆相册")
     open_windows.append(panel)
     panel.show()
     return panel
@@ -686,6 +771,7 @@ def _on_character_switched(
     *,
     speech_controller: SpeechController | None = None,
     vault: SecretVault | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> None:
     window.set_pet_dir(pet_dir)
     current_settings = (
@@ -697,6 +783,8 @@ def _on_character_switched(
     else:
         current_settings.save(settings_path)
     _apply_pet_voice_if_active(pet_dir, settings_path, speech_controller, vault=vault)
+    if relationship_store is not None:
+        relationship_store.bump(pet_dir.name)
 
 
 def _open_character_creation_dialog(
@@ -707,12 +795,18 @@ def _open_character_creation_dialog(
     *,
     vault: SecretVault | None = None,
     speech_controller: SpeechController | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> CharacterCreationDialog:
     dialog = CharacterCreationDialog(_assets_pets_dir(), settings_path, vault=vault)
 
     def _on_created(pet_dir: Path) -> None:
         _on_character_switched(
-            pet_dir, window, settings_path, speech_controller=speech_controller, vault=vault
+            pet_dir,
+            window,
+            settings_path,
+            speech_controller=speech_controller,
+            vault=vault,
+            relationship_store=relationship_store,
         )
         gallery_panel.on_character_created(pet_dir)
 
@@ -730,12 +824,18 @@ def _open_character_clone_dialog(
     *,
     vault: SecretVault | None = None,
     speech_controller: SpeechController | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> CharacterCloneDialog:
     dialog = CharacterCloneDialog(_assets_pets_dir(), settings_path, vault=vault)
 
     def _on_created(pet_dir: Path) -> None:
         _on_character_switched(
-            pet_dir, window, settings_path, speech_controller=speech_controller, vault=vault
+            pet_dir,
+            window,
+            settings_path,
+            speech_controller=speech_controller,
+            vault=vault,
+            relationship_store=relationship_store,
         )
         gallery_panel.on_character_created(pet_dir)
 
@@ -757,9 +857,7 @@ def _open_voice_change_dialog(
     dialog = VoiceChangeDialog(pet_dir, settings_path, vault=vault)
 
     def _on_voice_updated(changed_dir: Path) -> None:
-        _apply_pet_voice_if_active(
-            changed_dir, settings_path, speech_controller, vault=vault
-        )
+        _apply_pet_voice_if_active(changed_dir, settings_path, speech_controller, vault=vault)
         gallery_panel.refresh()
 
     dialog.voice_updated.connect(_on_voice_updated)
@@ -775,14 +873,22 @@ def _open_character_gallery(
     *,
     vault: SecretVault | None = None,
     speech_controller: SpeechController | None = None,
+    relationship_store: RelationshipStore | None = None,
 ) -> CharacterGalleryPanel:
     current_settings = AppSettings.load(settings_path)
     pet_dir = current_settings.window.pet_dir or _default_pet_dir()
-    panel = CharacterGalleryPanel(_assets_pets_dir(), pet_dir)
+    panel = CharacterGalleryPanel(
+        _assets_pets_dir(), pet_dir, relationship_store=relationship_store
+    )
     panel.setWindowTitle("角色画廊")
     panel.character_switched.connect(
         lambda new_pet_dir: _on_character_switched(
-            new_pet_dir, window, settings_path, speech_controller=speech_controller, vault=vault
+            new_pet_dir,
+            window,
+            settings_path,
+            speech_controller=speech_controller,
+            vault=vault,
+            relationship_store=relationship_store,
         )
     )
     panel.create_requested.connect(
@@ -793,6 +899,7 @@ def _open_character_gallery(
             open_windows,
             vault=vault,
             speech_controller=speech_controller,
+            relationship_store=relationship_store,
         )
     )
     panel.clone_requested.connect(
@@ -803,6 +910,7 @@ def _open_character_gallery(
             open_windows,
             vault=vault,
             speech_controller=speech_controller,
+            relationship_store=relationship_store,
         )
     )
     panel.voice_change_requested.connect(
@@ -818,6 +926,62 @@ def _open_character_gallery(
     open_windows.append(panel)
     panel.show()
     return panel
+
+
+_VISITOR_MIN_INTERVAL_S = 300
+_VISITOR_MAX_INTERVAL_S = 900
+_VISITOR_OFFSET_X = 20
+_GENERIC_GREETINGS = [
+    "路过打个招呼～",
+    "咦，你也在这里呀！",
+    "今天也要加油哦～",
+    "偷偷看了一下，继续忙你的吧！",
+    "嗨～只是想说一声你好。",
+]
+
+
+def _show_visitor_overlay(
+    window: OverlayWindow,
+    settings_path: Path,
+    *,
+    vault: SecretVault | None = None,
+) -> VisitorOverlay | None:
+    """随机挑一个非当前角色，在主窗口旁弹出一句纯装饰性问候，不驱动关系数据。"""
+    current_settings = (
+        load_settings_with_vault(settings_path, vault) if vault else AppSettings.load(settings_path)
+    )
+    current_pet_dir = current_settings.window.pet_dir or _default_pet_dir()
+    candidates = [
+        (pet_dir, meta)
+        for pet_dir, meta in discover_pet_dirs(_assets_pets_dir())
+        if pet_dir.name != current_pet_dir.name
+    ]
+    if not candidates:
+        return None
+    pet_dir, meta = random.choice(candidates)
+    greeting = random.choice(_GENERIC_GREETINGS)
+    x = window.x() + window.width() + _VISITOR_OFFSET_X
+    y = window.y()
+    return VisitorOverlay(pet_dir, meta, greeting, x, y)
+
+
+def _start_visitor_scheduler(
+    window: OverlayWindow,
+    settings_path: Path,
+    *,
+    vault: SecretVault | None = None,
+) -> QTimer:
+    """用单发定时器循环重新调度访客弹窗，每次触发后随机取 5-15 分钟之间的新间隔。"""
+    timer = QTimer(window)
+    timer.setSingleShot(True)
+
+    def _fire() -> None:
+        _show_visitor_overlay(window, settings_path, vault=vault)
+        timer.start(random.randint(_VISITOR_MIN_INTERVAL_S, _VISITOR_MAX_INTERVAL_S) * 1000)
+
+    timer.timeout.connect(_fire)
+    timer.start(random.randint(_VISITOR_MIN_INTERVAL_S, _VISITOR_MAX_INTERVAL_S) * 1000)
+    return timer
 
 
 def _startup_health_warnings(settings: AppSettings, bootstrap: EnvBootstrap) -> list[str]:
@@ -864,12 +1028,23 @@ def _shortcut_bindings(shortcuts: ShortcutsConfig) -> dict[str, str]:
     }
 
 
+def _maybe_queue_mcp_automation_trigger(
+    event: HookEvent,
+    *,
+    automation: McpAutomationConfig,
+    chat_input: queue.Queue[object],
+) -> None:
+    if automation.enabled and event.event == automation.trigger_event:
+        chat_input.put(McpAutomationTrigger(hook_event_name=event.event))
+
+
 def _build_tray_icon(
     app: QApplication,
     actions: PetActions,
     *,
     voice_capture: PcmAudioCapture | None = None,
     stt_worker: SttWorker | None = None,
+    proactive_enabled: bool = False,
 ) -> tuple[QSystemTrayIcon, QMenu]:
     icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
     tray = QSystemTrayIcon(icon, app)
@@ -902,6 +1077,12 @@ def _build_tray_icon(
     memory_action = QAction("记忆管理…", menu)
     memory_action.triggered.connect(actions.open_memory)
     menu.addAction(memory_action)
+
+    proactive_action = QAction("主动交互", menu)
+    proactive_action.setCheckable(True)
+    proactive_action.setChecked(proactive_enabled)
+    proactive_action.toggled.connect(actions.toggle_proactive)
+    menu.addAction(proactive_action)
 
     menu.addSeparator()
 
@@ -938,6 +1119,18 @@ def main() -> None:
 
     hook_bus = HookEventBus()
     hook_server = _start_hook_server(settings.hook_server, bootstrap, hook_bus)
+
+    def _on_hook_event_for_automation(event: HookEvent) -> None:
+        _maybe_queue_mcp_automation_trigger(
+            event, automation=settings.mcp_automation, chat_input=chat_input
+        )
+
+    hook_bus.hook_event.connect(_on_hook_event_for_automation)
+
+    growth_store = GrowthStore(bootstrap.resolve_data_dir() / "companion_growth.json")
+    relationship_store = RelationshipStore(
+        bootstrap.resolve_data_dir() / "character_relationships.json"
+    )
 
     memory_system = default_memory_system(
         settings.memory_dir, bootstrap, tuning=settings.memory_tuning
@@ -1013,8 +1206,15 @@ def main() -> None:
         open_settings=_open_settings,
         open_memory=lambda: _open_memory_panel(memory_system, open_windows),
         open_characters=lambda: _open_character_gallery(
-            window, settings_path, open_windows, vault=vault, speech_controller=speech_controller
+            window,
+            settings_path,
+            open_windows,
+            vault=vault,
+            speech_controller=speech_controller,
+            relationship_store=relationship_store,
         ),
+        open_recollections=lambda: _open_recollection_gallery(memory_system, open_windows),
+        toggle_proactive=lambda enabled: chat_input.put(ProactiveToggleRequest(enabled=enabled)),
         quit=_on_quit,
     )
 
@@ -1035,6 +1235,7 @@ def main() -> None:
         speech_controller=speech_controller,
         voice_capture=voice_capture,
         stt_worker=stt_worker,
+        growth_store=growth_store,
     )
     window.show()
 
@@ -1052,9 +1253,15 @@ def main() -> None:
     hotkey_manager.rebind(_shortcut_bindings(settings.shortcuts))
 
     tray, _tray_menu = _build_tray_icon(
-        app, actions, voice_capture=voice_capture, stt_worker=stt_worker
+        app,
+        actions,
+        voice_capture=voice_capture,
+        stt_worker=stt_worker,
+        proactive_enabled=settings.proactive.enabled,
     )
     tray.show()
+
+    _visitor_timer = _start_visitor_scheduler(window, settings_path, vault=vault)
 
     health_warnings = _startup_health_warnings(settings, bootstrap)
     if health_warnings:
@@ -1067,4 +1274,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

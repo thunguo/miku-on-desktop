@@ -22,6 +22,35 @@ def test_resolve_transition_unknown_event_returns_none() -> None:
     assert resolve_transition("SomeFutureEventNobodyHeardOf") is None
 
 
+def test_resolve_transition_codex_specific_events_are_mapped() -> None:
+    assert resolve_transition("SubagentStart") == Transition(
+        TransitionKind.BASELINE, PetState.TOOL_RUNNING
+    )
+    assert resolve_transition("SubagentStop") == Transition(
+        TransitionKind.TRANSIENT, PetState.SUCCESS
+    )
+    assert resolve_transition("PreCompact") == Transition(TransitionKind.TRANSIENT, PetState.NOTICE)
+    assert resolve_transition("PostCompact") == Transition(
+        TransitionKind.TRANSIENT, PetState.NOTICE
+    )
+
+
+def test_resolve_transition_gemini_specific_events_are_mapped() -> None:
+    assert resolve_transition("BeforeTool") == Transition(
+        TransitionKind.BASELINE, PetState.TOOL_RUNNING
+    )
+    assert resolve_transition("AfterTool") == Transition(TransitionKind.TRANSIENT, PetState.SUCCESS)
+    assert resolve_transition("BeforeAgent") == Transition(
+        TransitionKind.BASELINE, PetState.THINKING
+    )
+    assert resolve_transition("AfterAgent") == Transition(
+        TransitionKind.TRANSIENT, PetState.SUCCESS
+    )
+    assert resolve_transition("Notification") == Transition(
+        TransitionKind.BASELINE, PetState.CONFIRMATION_PENDING
+    )
+
+
 def test_hook_event_from_raw_extracts_all_known_fields() -> None:
     raw = {
         "event": "PostToolUseFailure",

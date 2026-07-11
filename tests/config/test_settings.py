@@ -13,6 +13,7 @@ from miku_on_desk.config.settings import (
     HookServerConfig,
     ImageGenerationConfig,
     LongTaskConfig,
+    McpAutomationConfig,
     McpServerConfig,
     McpTransport,
     MemoryTuningConfig,
@@ -196,10 +197,10 @@ def test_app_settings_persona_roundtrip_through_save_and_load(tmp_path: Path) ->
     assert loaded.persona == settings.persona
 
 
-def test_proactive_config_defaults_to_disabled() -> None:
+def test_proactive_config_defaults_to_enabled() -> None:
     proactive = ProactiveConfig()
 
-    assert proactive.enabled is False
+    assert proactive.enabled is True
     assert proactive.min_interval_s == 600
     assert proactive.max_interval_s == 1800
     assert proactive.idle_threshold_s == 120
@@ -281,9 +282,7 @@ def test_save_settings_with_vault_stores_tts_api_key_in_vault_not_on_disk(
 ) -> None:
     settings_path = tmp_path / "settings.json"
     settings = AppSettings()
-    settings.tts = TTSConfig(
-        enabled=True, provider=TTSProviderName.OPENAI, api_key="sk-tts-plain"
-    )
+    settings.tts = TTSConfig(enabled=True, provider=TTSProviderName.OPENAI, api_key="sk-tts-plain")
 
     vault = _make_vault(tmp_path)
     try:
@@ -511,6 +510,42 @@ def test_mcp_server_config_remote_transport_roundtrip_through_save_and_load(
     assert server.url == "https://example.com/mcp"
     assert server.headers == {"Authorization": "Bearer abc123"}
     assert server.command is None
+
+
+def test_mcp_automation_config_defaults_to_disabled_session_start() -> None:
+    config = McpAutomationConfig()
+
+    assert config.enabled is False
+    assert config.trigger_event == "SessionStart"
+    assert config.server_name == ""
+    assert config.tool_name == ""
+    assert config.tool_input == {}
+
+
+def test_app_settings_mcp_automation_roundtrip_through_save_and_load(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        mcp_automation=McpAutomationConfig(
+            enabled=True,
+            trigger_event="UserPromptSubmit",
+            server_name="spotify",
+            tool_name="play",
+            tool_input={"uri": "spotify:track:123"},
+        )
+    )
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded == settings
+    automation = loaded.mcp_automation
+    assert automation.enabled is True
+    assert automation.trigger_event == "UserPromptSubmit"
+    assert automation.server_name == "spotify"
+    assert automation.tool_name == "play"
+    assert automation.tool_input == {"uri": "spotify:track:123"}
 
 
 def test_acp_agent_config_timeout_s_defaults_to_none() -> None:

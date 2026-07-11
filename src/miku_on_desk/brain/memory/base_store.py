@@ -262,14 +262,18 @@ class BaseStore:
                 handle.write(link_line + "\n")
 
     def find_semantically_similar(
-        self, unit: MemoryUnit, threshold: float | None = None
+        self,
+        unit: MemoryUnit,
+        threshold: float | None = None,
+        *,
+        session_id: str | None = None,
     ) -> list[tuple[str, float]]:
         effective_threshold = (
             threshold if threshold is not None else self._default_similarity_threshold
         )
         query_tokens = _token_set(unit.content)
         scored: list[tuple[str, float]] = []
-        for candidate in self.list_units():
+        for candidate in self.list_units(session_id=session_id):
             if candidate.id == unit.id:
                 continue
             score = _jaccard(query_tokens, _token_set(candidate.content))

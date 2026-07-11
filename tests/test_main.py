@@ -13,10 +13,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 from qfluentwidgets import CaptionLabel
 
 from miku_on_desk.brain.agents.manager import AgentManager, AgentProfile
+from miku_on_desk.brain.mcp_automation import McpAutomationTrigger
 from miku_on_desk.brain.memory.models import Entity, Fact
 from miku_on_desk.brain.memory.system import default_memory_system
 from miku_on_desk.brain.providers.base import Message, TextBlock, ToolUseBlock
@@ -33,32 +35,48 @@ from miku_on_desk.config.settings import (
     AppSettings,
     BrainResilienceConfig,
     EnvBootstrap,
+    HookServerConfig,
+    McpAutomationConfig,
     ModelTier,
     PersonaConfig,
     ProviderConfig,
     ShortcutsConfig,
     TTSConfig,
     TTSProviderName,
+    WindowConfig,
 )
 from miku_on_desk.face.character_voice import PetVoiceConfig, save_pet_voice_config
+from miku_on_desk.face.hooks.bridge import HookEventBus
+from miku_on_desk.face.hooks.schema import HookEvent
+from miku_on_desk.face.relationship_store import RelationshipStore
 from miku_on_desk.face.ui.character_gallery import CharacterGalleryPanel, CharacterStandTile
 from miku_on_desk.face.ui.overlay_window import OverlayWindow
 from miku_on_desk.face.ui.speech_controller import SpeechController, _SynthWorker
 from miku_on_desk.main import (
+    _VISITOR_MAX_INTERVAL_S,
+    _VISITOR_MIN_INTERVAL_S,
+    PetActions,
     _append_reminder,
     _build_identity_prompt,
+    _build_tray_icon,
     _extract_assistant_text,
     _format_agents_summary,
     _format_core_memory,
     _format_memory_index,
+    _maybe_queue_mcp_automation_trigger,
+    _on_character_switched,
     _open_character_clone_dialog,
     _open_character_creation_dialog,
+    _open_character_gallery,
     _open_memory_panel,
     _open_voice_change_dialog,
     _rebase_history,
     _resolve_speech_controller_for_settings,
     _run_brain_thread,
     _shortcut_bindings,
+    _show_visitor_overlay,
+    _start_hook_server,
+    _start_visitor_scheduler,
     _startup_health_warnings,
     _sync_agent_profiles,
 )
@@ -339,7 +357,6 @@ def test_run_brain_thread_emits_brain_crashed_when_brain_main_raises(
     assert captured == [BrainCrashed(error="炸了")]
 
 
-
 def test_run_brain_thread_restarts_after_transient_crash_and_recovers(
     qapp: QApplication,
 ) -> None:
@@ -387,9 +404,7 @@ def test_run_brain_thread_gives_up_after_exhausting_restart_budget(
         enabled=True, max_restart_attempts=3, base_delay_s=0.0, max_delay_s=0.0
     )
 
-    with patch(
-        "miku_on_desk.main._brain_main", side_effect=RuntimeError("持续崩溃")
-    ):
+    with patch("miku_on_desk.main._brain_main", side_effect=RuntimeError("持续崩溃")):
         thread = threading.Thread(
             target=_run_brain_thread,
             kwargs={
@@ -432,9 +447,7 @@ def test_run_brain_thread_resets_restart_budget_after_stable_run(
     )
     monotonic_values = iter([0.0, 1.0, 2.0, 100.0, 101.0, 102.0])
 
-    with patch(
-        "miku_on_desk.main._brain_main", side_effect=RuntimeError("崩溃")
-    ):
+    with patch("miku_on_desk.main._brain_main", side_effect=RuntimeError("崩溃")):
         thread = threading.Thread(
             target=_run_brain_thread,
             kwargs={
@@ -554,7 +567,6 @@ def test_shortcut_bindings_maps_action_names_to_configured_sequences() -> None:
     }
 
 
-
 class _FakeTTSProvider:
     pcm_format = None
 
@@ -627,3 +639,257 @@ def test_resolve_speech_controller_for_settings_keeps_old_controller_when_constr
         assert result._worker is old_worker
         controller.close()
 
+
+def _fake_hook_server() -> Mock:
+    server = Mock()
+    server.port = 8765
+    server.token = "tok1"
+    return server
+
+
+def test_start_hook_server_disabled_returns_none(tmp_path: Path) -> None:
+    result = _start_hook_server(
+        HookServerConfig(enabled=False), EnvBootstrap(data_dir=tmp_path), HookEventBus()
+    )
+
+    assert result is None
+
+
+def test_start_hook_server_installs_claude_code_by_default(tmp_path: Path) -> None:
+    with (
+        patch("miku_on_desk.main.HookServer", return_value=_fake_hook_server()),
+        patch("miku_on_desk.main.install") as install_claude,
+        patch("miku_on_desk.main.install_codex") as install_codex,
+        patch("miku_on_desk.main.install_gemini") as install_gemini,
+    ):
+        _start_hook_server(HookServerConfig(), EnvBootstrap(data_dir=tmp_path), HookEventBus())
+
+    install_claude.assert_called_once()
+    install_codex.assert_not_called()
+    install_gemini.assert_not_called()
+
+
+def test_start_hook_server_installs_codex_and_gemini_when_opted_in(tmp_path: Path) -> None:
+    with (
+        patch("miku_on_desk.main.HookServer", return_value=_fake_hook_server()),
+        patch("miku_on_desk.main.install") as install_claude,
+        patch("miku_on_desk.main.install_codex") as install_codex,
+        patch("miku_on_desk.main.install_gemini") as install_gemini,
+    ):
+        _start_hook_server(
+            HookServerConfig(install_codex=True, install_gemini_cli=True),
+            EnvBootstrap(data_dir=tmp_path),
+            HookEventBus(),
+        )
+
+    install_claude.assert_called_once()
+    install_codex.assert_called_once()
+    install_gemini.assert_called_once()
+
+
+def test_start_hook_server_claude_code_install_failure_does_not_block_others(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch("miku_on_desk.main.HookServer", return_value=_fake_hook_server()),
+        patch("miku_on_desk.main.install", side_effect=RuntimeError("炸了")),
+        patch("miku_on_desk.main.install_codex") as install_codex,
+    ):
+        result = _start_hook_server(
+            HookServerConfig(install_codex=True),
+            EnvBootstrap(data_dir=tmp_path),
+            HookEventBus(),
+        )
+
+    assert result is not None
+    install_codex.assert_called_once()
+
+
+def _make_pet_actions(**overrides: object) -> PetActions:
+    defaults: dict[str, object] = {
+        "talk": lambda text: None,
+        "queue_message": lambda text: None,
+        "open_settings": lambda: None,
+        "open_memory": lambda: None,
+        "open_characters": lambda: None,
+        "open_recollections": lambda: None,
+        "toggle_proactive": lambda enabled: None,
+        "quit": lambda: None,
+    }
+    defaults.update(overrides)
+    return PetActions(**defaults)  # type: ignore[arg-type]
+
+
+def _find_proactive_action(menu: QMenu) -> QAction:
+    for action in menu.actions():
+        if action.text() == "主动交互":
+            return action
+    raise AssertionError("未找到「主动交互」托盘菜单项")
+
+
+def test_build_tray_icon_proactive_action_reflects_initial_enabled_state(
+    qapp: QApplication,
+) -> None:
+    _tray, menu = _build_tray_icon(qapp, _make_pet_actions(), proactive_enabled=True)
+
+    assert _find_proactive_action(menu).isChecked() is True
+
+
+def test_build_tray_icon_proactive_action_reflects_initial_disabled_state(
+    qapp: QApplication,
+) -> None:
+    _tray, menu = _build_tray_icon(qapp, _make_pet_actions(), proactive_enabled=False)
+
+    assert _find_proactive_action(menu).isChecked() is False
+
+
+def test_build_tray_icon_toggling_proactive_action_invokes_callback(
+    qapp: QApplication,
+) -> None:
+    toggled: list[bool] = []
+    actions = _make_pet_actions(toggle_proactive=toggled.append)
+    _tray, menu = _build_tray_icon(qapp, actions, proactive_enabled=False)
+
+    _find_proactive_action(menu).trigger()
+
+    assert toggled == [True]
+
+
+def test_on_character_switched_bumps_relationship_store(qapp: QApplication, tmp_path: Path) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    window = OverlayWindow(pet_dir)
+    window.show()
+    store = RelationshipStore(tmp_path / "character_relationships.json")
+
+    _on_character_switched(pet_dir, window, settings_path, relationship_store=store)
+    _on_character_switched(pet_dir, window, settings_path, relationship_store=store)
+
+    assert store.get("pet_a") == 2
+
+
+def test_on_character_switched_without_relationship_store_does_not_raise(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    window = OverlayWindow(pet_dir)
+    window.show()
+
+    _on_character_switched(pet_dir, window, settings_path)
+
+    assert AppSettings.load(settings_path).window.pet_dir == pet_dir
+
+
+def test_open_character_gallery_threads_relationship_store_into_switch(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    old_pet_dir = _make_pet_dir(assets_pets_dir, "old_pet")
+    new_pet_dir = _make_pet_dir(assets_pets_dir, "new_pet")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=old_pet_dir)).save(settings_path)
+    window = OverlayWindow(old_pet_dir)
+    window.show()
+    store = RelationshipStore(tmp_path / "character_relationships.json")
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        panel = _open_character_gallery(window, settings_path, [], relationship_store=store)
+        panel.character_switched.emit(new_pet_dir)
+
+    assert store.get("new_pet") == 1
+
+
+def test_show_visitor_overlay_skips_current_character(qapp: QApplication, tmp_path: Path) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    current_pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    other_pet_dir = _make_pet_dir(assets_pets_dir, "pet_b")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=current_pet_dir)).save(settings_path)
+    window = OverlayWindow(current_pet_dir)
+    window.show()
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        overlay = _show_visitor_overlay(window, settings_path)
+
+    assert overlay is not None
+    assert overlay._sprite._meta.pet_name == other_pet_dir.name
+    overlay.close()
+
+
+def test_show_visitor_overlay_returns_none_with_only_one_character(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    only_pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=only_pet_dir)).save(settings_path)
+    window = OverlayWindow(only_pet_dir)
+    window.show()
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        overlay = _show_visitor_overlay(window, settings_path)
+
+    assert overlay is None
+
+
+def test_start_visitor_scheduler_reschedules_after_firing(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    assets_pets_dir = tmp_path / "assets_pets"
+    assets_pets_dir.mkdir()
+    pet_dir = _make_pet_dir(assets_pets_dir, "pet_a")
+    _make_pet_dir(assets_pets_dir, "pet_b")
+    settings_path = tmp_path / "settings.json"
+    AppSettings(window=WindowConfig(pet_dir=pet_dir)).save(settings_path)
+    window = OverlayWindow(pet_dir)
+    window.show()
+
+    with patch("miku_on_desk.main._assets_pets_dir", return_value=assets_pets_dir):
+        timer = _start_visitor_scheduler(window, settings_path)
+        assert timer.isActive() is True
+        assert _VISITOR_MIN_INTERVAL_S * 1000 <= timer.interval() <= _VISITOR_MAX_INTERVAL_S * 1000
+
+        timer.timeout.emit()
+
+    assert timer.isActive() is True
+    assert _VISITOR_MIN_INTERVAL_S * 1000 <= timer.interval() <= _VISITOR_MAX_INTERVAL_S * 1000
+
+
+def test_maybe_queue_mcp_automation_trigger_enqueues_when_enabled_and_event_matches() -> None:
+    automation = McpAutomationConfig(enabled=True, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="SessionStart")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    queued = chat_input.get_nowait()
+    assert isinstance(queued, McpAutomationTrigger)
+    assert queued.hook_event_name == "SessionStart"
+
+
+def test_maybe_queue_mcp_automation_trigger_skips_when_disabled() -> None:
+    automation = McpAutomationConfig(enabled=False, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="SessionStart")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    assert chat_input.empty()
+
+
+def test_maybe_queue_mcp_automation_trigger_skips_when_event_does_not_match() -> None:
+    automation = McpAutomationConfig(enabled=True, trigger_event="SessionStart")
+    chat_input: queue.Queue[object] = queue.Queue()
+    event = HookEvent(event="UserPromptSubmit")
+
+    _maybe_queue_mcp_automation_trigger(event, automation=automation, chat_input=chat_input)
+
+    assert chat_input.empty()

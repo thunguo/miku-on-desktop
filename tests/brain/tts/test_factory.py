@@ -7,6 +7,7 @@ import pytest
 from miku_on_desk.brain.tts.edge_provider import EdgeTTSProvider
 from miku_on_desk.brain.tts.elevenlabs_provider import ElevenLabsTTSProvider
 from miku_on_desk.brain.tts.factory import create_tts_provider
+from miku_on_desk.brain.tts.fallback_provider import FallbackTTSProvider
 from miku_on_desk.brain.tts.openai_provider import OpenAITTSProvider
 from miku_on_desk.config.settings import TTSConfig, TTSProviderName
 
@@ -49,6 +50,37 @@ def test_create_tts_provider_elevenlabs_without_api_key_raises() -> None:
 
     with pytest.raises(ValueError, match="api_key"):
         create_tts_provider(config)
+
+
+def test_create_tts_provider_wraps_with_fallback_when_enabled() -> None:
+    config = TTSConfig(
+        provider=TTSProviderName.ELEVENLABS,
+        api_key="sk-el",
+        voice="21m00Tcm4TlvDq8ikWAM",
+        fallback_to_edge=True,
+    )
+
+    provider = create_tts_provider(config)
+
+    assert isinstance(provider, FallbackTTSProvider)
+
+
+def test_create_tts_provider_does_not_wrap_edge_even_with_fallback_enabled() -> None:
+    config = TTSConfig(provider=TTSProviderName.EDGE, fallback_to_edge=True)
+
+    provider = create_tts_provider(config)
+
+    assert isinstance(provider, EdgeTTSProvider)
+
+
+def test_create_tts_provider_does_not_wrap_when_fallback_disabled() -> None:
+    config = TTSConfig(
+        provider=TTSProviderName.ELEVENLABS, api_key="sk-el", voice="21m00Tcm4TlvDq8ikWAM"
+    )
+
+    provider = create_tts_provider(config)
+
+    assert isinstance(provider, ElevenLabsTTSProvider)
 
 
 def test_elevenlabs_provider_falls_back_from_openai_default_model() -> None:

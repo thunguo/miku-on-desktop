@@ -61,10 +61,11 @@ _EPISODIC_SYSTEM_PROMPT = (
 
 _EMOTIONAL_SYSTEM_PROMPT = (
     "你负责维护用户的情感/偏好档案（JSON），根据新对话内容判断是否需要更新其中的叶子字段。"
-    "只输出需要新增/修改的叶子路径，不要重复未变化的内容。"
-    '严格输出 JSON：{"updates": {"location_preferences.familiar_cities": [...]}}'
-    '（路径用 "a.b.c" 形式表示嵌套），没有需要更新的就输出 {"updates": {}}，不要输出任何'
-    "其他文字。"
+    "只输出需要新增/修改的叶子路径，不要重复未变化的内容。每条更新都要给出你对这条判断的"
+    "置信度（0-1，不确定就给低分）。"
+    '严格输出 JSON：{"updates": [{"path": "location_preferences.familiar_cities", '
+    '"value": [...], "confidence": 0.9}]}（路径用 "a.b.c" 形式表示嵌套），没有需要更新的'
+    '就输出 {"updates": []}，不要输出任何其他文字。'
 )
 
 
@@ -137,13 +138,24 @@ def _parse_episodic_event(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _parse_emotional_updates(text: str) -> dict[str, Any]:
+def _parse_emotional_updates(text: str) -> list[tuple[str, Any, float]]:
     try:
         data: Any = json.loads(text)
-        updates = data.get("updates", {})
-        return cast(dict[str, Any], updates) if isinstance(updates, dict) else {}
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        return {}
+        updates = data.get("updates", [])
+        if not isinstance(updates, list):
+            return []
+        parsed_updates: list[tuple[str, Any, float]] = []
+        for row in updates:
+            if not isinstance(row, dict) or not row.get("path") or "value" not in row:
+                continue
+            try:
+                confidence = float(row.get("confidence", 0.7))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            parsed_updates.append((row["path"], row["value"], confidence))
+        return parsed_updates
+    except (json.JSONDecodeError, AttributeError, TypeError, KeyError):
+        return []
 
 
 def _set_by_path(root: dict[str, Any], path: str, value: Any) -> None:
@@ -248,6 +260,7 @@ async def _extract_emotional(
     emotional: EmotionalStore,
     router: ModelRouter,
     providers: dict[ProviderName, Provider],
+    min_confidence: float = 0.75,
 ) -> None:
     resolved = router.resolve(_EXTRACTION_TIER)
     provider = providers[resolved.provider]
@@ -268,8 +281,13 @@ async def _extract_emotional(
         return
 
     merged = dict(current)
-    for path, value in updates.items():
-        _set_by_path(merged, path, value)
+    applied = False
+    for path, value, confidence in updates:
+        if confidence >= min_confidence:
+            _set_by_path(merged, path, value)
+            applied = True
+    if not applied:
+        return
     merged["last_updated"] = _now_iso()
     emotional.save_preferences(merged)
 
@@ -286,6 +304,7 @@ async def run_extractions(
     router: ModelRouter,
     providers: dict[ProviderName, Provider],
     now: str | None = None,
+    emotional_confidence_threshold: float = 0.75,
 ) -> None:
     """给这一轮新增的 base 单元跑一次提取：语义/情感即时触发，情景按批次触发。
 
@@ -312,7 +331,13 @@ async def run_extractions(
 
     tasks = [
         _extract_semantic(units, semantic=semantic, router=router, providers=providers),
-        _extract_emotional(units, emotional=emotional, router=router, providers=providers),
+        _extract_emotional(
+            units,
+            emotional=emotional,
+            router=router,
+            providers=providers,
+            min_confidence=emotional_confidence_threshold,
+        ),
     ]
     if should_flush:
         tasks.append(

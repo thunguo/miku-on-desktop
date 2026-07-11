@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from platformdirs import PlatformDirs
 from pydantic import BaseModel, Field
@@ -126,6 +126,21 @@ class McpServerConfig(BaseModel):
     路径沙箱/先读后改这两条结构性边界，见 `brain/mcp/host.py::_infer_policy_spec`。"""
 
 
+class McpAutomationConfig(BaseModel):
+    """检测到指定 hook 事件时自动触发一次预配置的 MCP 工具调用（跨系统联动示例）。
+
+    ``server_name``/``tool_name`` 与真实 MCP server 名/工具名对应，拼接规则见
+    `brain/mcp_automation.py::build_automation_tool_use`；若拼错或目标 server 未连接，
+    该次调用会被 `ToolRegistry.evaluate()` 判定为 DENY，不需要在这里做额外校验。
+    """
+
+    enabled: bool = False
+    trigger_event: str = "SessionStart"
+    server_name: str = ""
+    tool_name: str = ""
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentProfileConfig(BaseModel):
     """内部 sub-agent 画像（researcher/operator/planner 等），供 spawn_agents 编排使用。"""
 
@@ -180,10 +195,11 @@ class BrainResilienceConfig(BaseModel):
 class MemoryTuningConfig(BaseModel):
     """记忆检索/整理/屏幕匹配相关阈值，默认值与原硬编码常量一致。
 
-    多数字段目前只被生产代码里已有的活跃调用链（compaction/screen_analyze）消费；
-    ``retrieval_min_confidence``/``base_similarity_threshold``/
-    ``emotional_confidence_threshold`` 对应的方法当前没有生产调用点（仅测试直接调用），
-    先做成可配置项，供未来接入真实调用路径时复用。
+    ``retrieval_min_confidence`` 接入 `recall` 工具与每轮系统提示拼装共用的
+    `retrieval.retrieve_hints()`；``base_similarity_threshold`` 接入
+    `MemorySystem.add_memory_unit()` 写入热路径（比较范围收窄到同会话内，命中只记日志，
+    不跳过写入）；``emotional_confidence_threshold`` 接入情感抽取管线，过滤掉 LLM 给出的
+    低置信度偏好更新。
     """
 
     retrieval_min_confidence: float = 0.7
@@ -238,9 +254,14 @@ class PersonaConfig(BaseModel):
 
 class ProactiveConfig(BaseModel):
     """主动交互：定时/不定时地根据屏幕内容主动搭话。改动后需重启应用生效，
-    与其余设置项（如 persona/model_router）的既有行为一致，不做热重载。"""
+    与其余设置项（如 persona/model_router）的既有行为一致，不做热重载。
 
-    enabled: bool = False
+    ``enabled`` 默认开启：因为 ``AppSettings.save()`` 会显式写出每个字段的当前值，
+    这次翻转只影响从未生成过 ``settings.json`` 的全新安装，已经保存过偏好的存量用户
+    不受影响。运行时还可以用系统托盘图标菜单的"主动交互"勾选项一键暂停/恢复，那是
+    session 级、不写回这里的临时开关，与这个默认值互不影响。"""
+
+    enabled: bool = True
     min_interval_s: int = 600
     max_interval_s: int = 1800
     idle_threshold_s: int = 120
@@ -270,6 +291,11 @@ class TTSConfig(BaseModel):
 
     设置面板保存后立即热切换生效（``main.py::_resolve_speech_controller_for_settings``），
     不需要重启应用。
+
+    ``fallback_to_edge`` 默认关闭：开启后合成失败（Key 失效/欠费/网络抖动）会自动换 Edge
+    说完这句话，但代价是当前引擎（若原生输出裸 PCM，如 ElevenLabs）会从逐块实时流式播放
+    退化为整句合成完才出声——这是维持"降级候选之间播放格式互相安全兼容"的必要代价，涉及
+    产品行为变化，需要用户主动打开。
     """
 
     enabled: bool = False
@@ -282,6 +308,7 @@ class TTSConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = "tts-1"
+    fallback_to_edge: bool = False
 
 
 class ComputerUseConfig(BaseModel):
@@ -293,7 +320,13 @@ class ComputerUseConfig(BaseModel):
 
 
 class HookServerConfig(BaseModel):
-    """本地 hook sidecar（接收 Claude Code 等外部 CLI 工具的通知）的监听设置。
+    """本地 hook sidecar（接收 Claude Code/Codex CLI/Gemini CLI 等外部 CLI 工具的通知）
+    的监听设置。
+
+    ``install_codex``/``install_gemini_cli`` 默认关闭：与 ``include_experimental`` 一样是
+    保守 opt-in——这两家目前只能通过 ``face/hooks/forward.py`` 转发层接入（见
+    ``face/hooks/installer.py`` 模块文档），涉及往用户自己的 CLI 配置文件里写入内容，
+    先默认不动、等用户确认需要再打开。
 
     ``include_experimental`` 默认关闭：见 ``face/hooks/installer.py`` 模块文档,
     ``PreToolUse``/``PermissionRequest``/``PermissionDenied`` 的响应体可能被 Claude Code
@@ -304,6 +337,9 @@ class HookServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     include_experimental: bool = False
+    install_claude_code: bool = True
+    install_codex: bool = False
+    install_gemini_cli: bool = False
 
 
 class ImageGenerationConfig(BaseModel):
@@ -348,6 +384,7 @@ class AppSettings(BaseModel):
     model_router: ModelRouterConfig = Field(default_factory=ModelRouterConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
+    mcp_automation: McpAutomationConfig = Field(default_factory=McpAutomationConfig)
     skills_dir: Path | None = None
     memory_dir: Path | None = None
     agent_profiles: list[AgentProfileConfig] = Field(default_factory=list)

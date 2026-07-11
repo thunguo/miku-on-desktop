@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout
 from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton, StrongBodyLabel
 
 from miku_on_desk.face.character_voice import load_pet_voice_config
+from miku_on_desk.face.relationship_store import RelationshipStore
 from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, SpriteSheetMetaError, frame_index
 from miku_on_desk.face.ui.sprite_widget import PetSpriteWidget
 from miku_on_desk.face.ui.theme import (
@@ -31,6 +32,22 @@ _TILE_SCALE = 1.0
 _COLUMNS = 4
 
 
+def discover_pet_dirs(assets_pets_dir: Path) -> list[tuple[Path, SpriteSheetMeta]]:
+    """扫描 ``assets_pets_dir`` 下带有合法 ``pet.json`` 的角色目录，按目录名排序返回。"""
+    found: list[tuple[Path, SpriteSheetMeta]] = []
+    if not assets_pets_dir.is_dir():
+        return found
+    for child in sorted(assets_pets_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        try:
+            meta = SpriteSheetMeta.load(child / "pet.json")
+        except (SpriteSheetMetaError, FileNotFoundError):
+            continue
+        found.append((child, meta))
+    return found
+
+
 class CharacterStandTile(QWidget):
     """单个角色展台：循环播放该角色的 idle（或 fallback）动画 + 名称 + 切换按钮。"""
 
@@ -43,6 +60,7 @@ class CharacterStandTile(QWidget):
         meta: SpriteSheetMeta,
         *,
         is_current: bool,
+        familiarity: int = 0,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -71,6 +89,11 @@ class CharacterStandTile(QWidget):
             voice_badge = CaptionLabel("🔊 已绑定专属声音", self)
             voice_badge.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             layout.addWidget(voice_badge)
+
+        if familiarity > 0:
+            familiarity_badge = CaptionLabel(f"❤ 熟悉度 {familiarity}", self)
+            familiarity_badge.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(familiarity_badge)
 
         button_row = QHBoxLayout()
         button = PrimaryPushButton("当前角色" if is_current else "切换到此角色", self)
@@ -123,7 +146,7 @@ class CharacterStandTile(QWidget):
 
 
 class _CreateCharacterTile(QWidget):
-    """"＋ 创建新角色"格，虚线边框区分于普通角色展台。"""
+    """“＋ 创建新角色”格，虚线边框区分于普通角色展台。"""
 
     clicked = Signal()
 
@@ -159,7 +182,7 @@ class _CreateCharacterTile(QWidget):
 
 
 class _CloneCharacterTile(QWidget):
-    """"＋ 克隆"格，视觉上与 ``_CreateCharacterTile`` 完全一致，虚线边框区分于普通角色展台。"""
+    """＋ 克隆格，视觉上与 ``_CreateCharacterTile`` 完全一致，虚线边框区分于普通角色展台。"""
 
     clicked = Signal()
 
@@ -207,10 +230,13 @@ class CharacterGalleryPanel(QWidget):
         assets_pets_dir: Path,
         current_pet_dir: Path,
         parent: QWidget | None = None,
+        *,
+        relationship_store: RelationshipStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._assets_pets_dir = assets_pets_dir
         self._current_pet_dir = current_pet_dir
+        self._relationship_store = relationship_store
         self.resize(720, 560)
 
         outer = QVBoxLayout(self)
@@ -227,18 +253,7 @@ class CharacterGalleryPanel(QWidget):
         self._reload()
 
     def _scan_characters(self) -> list[tuple[Path, SpriteSheetMeta]]:
-        found: list[tuple[Path, SpriteSheetMeta]] = []
-        if not self._assets_pets_dir.is_dir():
-            return found
-        for child in sorted(self._assets_pets_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            try:
-                meta = SpriteSheetMeta.load(child / "pet.json")
-            except (SpriteSheetMetaError, FileNotFoundError):
-                continue
-            found.append((child, meta))
-        return found
+        return discover_pet_dirs(self._assets_pets_dir)
 
     def _reload(self) -> None:
         while self._grid.count():
@@ -268,11 +283,14 @@ class CharacterGalleryPanel(QWidget):
         else:
             self._empty_label.hide()
 
+        familiarity_map = self._relationship_store.load() if self._relationship_store else {}
         for index, (pet_dir, meta) in enumerate(characters):
+            familiarity = familiarity_map.get(pet_dir.name, 0)
             tile = CharacterStandTile(
                 pet_dir,
                 meta,
                 is_current=(pet_dir == self._current_pet_dir),
+                familiarity=familiarity,
                 parent=self._grid_container,
             )
             tile.switch_requested.connect(self._on_switch_requested)
@@ -302,7 +320,6 @@ class CharacterGalleryPanel(QWidget):
         """新角色生成完成后由调用方触发，切换当前选中项并重新扫描刷新网格。"""
         self._current_pet_dir = pet_dir
         self._reload()
-
 
     def refresh(self) -> None:
         """外部状态（如某角色绑定的声音）发生变化后，重新扫描刷新网格，不改变当前选中项。"""

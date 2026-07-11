@@ -4,7 +4,9 @@
 纯函数合成，``PetSpriteWidget`` 只知道怎么画一帧,真正把两者粘起来的是这里的
 ``_on_animation_tick``。事件来源有两路,都最终落到同一个状态机上：Brain 的 9 种事件
 （``bridge/events.py``）与外部 CLI 工具的 hook 通知（``face/hooks``）,分别由
-``_on_brain_event``/``_on_hook_event`` 消费。
+``_on_brain_event``/``_on_hook_event`` 消费。``_on_hook_event`` 还额外把事件流喂给
+``SessionTracker``，在会话边界（详见 ``face/hooks/session_report.py``）到达时生成一段
+战报小结,与 ``PetStateMachine`` 的状态切换完全独立、互不影响。
 """
 
 from __future__ import annotations
@@ -41,6 +43,15 @@ from miku_on_desk.bridge.events import (
 )
 from miku_on_desk.face.hooks.bridge import HookEventBus
 from miku_on_desk.face.hooks.schema import HookEvent, TransitionKind, resolve_transition
+from miku_on_desk.face.hooks.session_report import (
+    CompanionGrowth,
+    GrowthStore,
+    SessionReport,
+    SessionTracker,
+    format_session_report,
+    growth_flavor_text,
+    update_growth,
+)
 from miku_on_desk.face.pet_motion import PetTargetWalker, PetWalker, compute_stand_position
 from miku_on_desk.face.pet_state import PetState, PetStateMachine
 from miku_on_desk.face.sprite_sheet import SpriteSheetMeta, frame_index
@@ -67,7 +78,8 @@ _REFLOW_THROTTLE_MS = 33
 # Stop/StopFailure 代表一整轮外部会话结束，除了播放一次性反应外还要把常驻基线收回 IDLE，
 # 与 Brain 侧 LoopFinished 的处理方式对称——不能只靠 resolve_transition 的查表结果，
 # 因为查表只知道"这个事件对应哪个 transient"，不知道"这个事件还标志着一轮交互彻底结束"。
-_HOOK_EVENTS_RESETTING_BASELINE = frozenset({"Stop", "StopFailure"})
+# AfterAgent 是 Gemini CLI 里语义对应的"一轮 agent 交互结束"事件，同样需要收回 baseline。
+_HOOK_EVENTS_RESETTING_BASELINE = frozenset({"Stop", "StopFailure", "AfterAgent"})
 
 # express_reaction 工具的反应词表。
 _REACTION_STATE_MAP: dict[ReactionKind, PetState] = {
@@ -121,7 +133,8 @@ class OverlayWindow(QWidget):
     ``event_bus``/``confirmation_gate``/``cancellation_gate``/``hook_bus`` 均为可选：不传时
     窗口只是一个纯展示 spike。都传入时，Brain 事件与外部 CLI hook 事件共享同一个
     ``PetStateMachine``，谁先到就先生效，互不冲突（transient 后来者覆盖、baseline 只在真正
-    变化时重置计时）；``cancellation_gate`` 单独驱动任务进行中显示的停止按钮。
+    变化时重置计时）；``cancellation_gate`` 单独驱动任务进行中显示的停止按钮。``growth_store``
+    同样可选：不传时仍会展示单次会话的战报小结，只是不追加/持久化跨会话的心情曲线。
     """
 
     def __init__(
@@ -140,6 +153,7 @@ class OverlayWindow(QWidget):
         speech_controller: SpeechController | None = None,
         voice_capture: PcmAudioCapture | None = None,
         stt_worker: SttWorker | None = None,
+        growth_store: GrowthStore | None = None,
     ) -> None:
         super().__init__()
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
@@ -198,8 +212,16 @@ class OverlayWindow(QWidget):
 
         self._confirmation_gate = confirmation_gate
         self._speech_controller = speech_controller
+        self._audio_level = 0.0
+        self._talking_segment_started_at: float | None = None
+        self._talking_active_elapsed = 0.0
+        self._talking_last_tick_t = 0.0
+        self._connect_speech_controller_audio_level(speech_controller)
         self._voice_capture = voice_capture
         self._stt_worker = stt_worker
+        self._session_tracker = SessionTracker()
+        self._growth_store = growth_store
+        self._growth = growth_store.load() if growth_store is not None else CompanionGrowth()
         self._pending_confirmation_request_id: str | None = None
         self._chat_popup: ChatPopup | None = None
         self._tool_use_names: dict[str, str] = {}
@@ -252,13 +274,41 @@ class OverlayWindow(QWidget):
     def _elapsed(self) -> float:
         return time.monotonic() - self._start_time
 
+    def _connect_speech_controller_audio_level(
+        self, speech_controller: SpeechController | None
+    ) -> None:
+        if speech_controller is not None:
+            speech_controller.audio_level_changed.connect(self._on_audio_level_changed)
+
+    def _on_audio_level_changed(self, level: float) -> None:
+        self._audio_level = level
+
+    def _advance_talking_elapsed(self, t: float, entered_at: float) -> float:
+        """把 TALKING 帧号推进的"经过时间"从墙钟时间换成"响度加权的有效播放时间"：
+        响度 0（静音/没有语音功能）时完全不推进，帧定格在当前一帧；响度 1 时按精灵表
+        原始 fps 正常循环；中间值按比例放慢，不会比原速更快。
+        """
+        if entered_at != self._talking_segment_started_at:
+            self._talking_segment_started_at = entered_at
+            self._talking_active_elapsed = 0.0
+            self._talking_last_tick_t = t
+            return 0.0
+        dt = t - self._talking_last_tick_t
+        self._talking_last_tick_t = t
+        self._talking_active_elapsed += dt * self._audio_level
+        return self._talking_active_elapsed
+
     def _on_animation_tick(self) -> None:
         t = self._elapsed()
         state = self._state_machine.current_state(t)
         entered_at = self._state_machine.state_entered_at(t)
         info = self._meta.states.get(state, self._meta.states[self._meta.fallback_state])
+        if state == PetState.TALKING and self._speech_controller is not None:
+            elapsed_in_state = self._advance_talking_elapsed(t, entered_at)
+        else:
+            elapsed_in_state = t - entered_at
         frame = frame_index(
-            t - entered_at, fps=info.fps, frame_count=info.frame_count, loop=info.loop
+            elapsed_in_state, fps=info.fps, frame_count=info.frame_count, loop=info.loop
         )
         self._sprite_widget.set_frame(state, frame)
 
@@ -437,17 +487,36 @@ class OverlayWindow(QWidget):
         self._progress_label.move(max(x, 0), y)
 
     def _on_hook_event(self, event: HookEvent) -> None:
+        t = self._elapsed()
+        report = self._session_tracker.observe(event, t=t)
+        if report is not None:
+            self._show_session_report(report)
+
         transition = resolve_transition(event.event)
         if transition is None:
             logger.info("忽略未知 hook 事件：%s", event.event)
             return
-        t = self._elapsed()
         if transition.kind is TransitionKind.BASELINE:
             self._state_machine.set_baseline_state(transition.state, t=t)
             return
         self._state_machine.trigger_transient(transition.state, t=t)
         if event.event in _HOOK_EVENTS_RESETTING_BASELINE:
             self._state_machine.set_baseline_state(PetState.IDLE, t=t)
+
+    def _show_session_report(self, report: SessionReport) -> None:
+        """会话边界（``SessionEnd``，或 Codex 场景下的下一次 ``SessionStart``）触发的
+        战报小结；心情曲线只在配置了持久化的 ``growth_store`` 时才更新/追加一句话，
+        没配置时退化为"只报告这次会话，不追加长期心情"。
+        """
+        text = format_session_report(report)
+        if self._growth_store is not None:
+            self._growth = update_growth(self._growth, report)
+            flavor = growth_flavor_text(self._growth)
+            if flavor is not None:
+                text = f"{text}\n{flavor}"
+            self._growth_store.save(self._growth)
+        self._bubble.show_speech(text)
+        self._reflow_bubble()
 
     def _on_bubble_decision(self, approved: bool) -> None:
         if self._confirmation_gate is None or self._pending_confirmation_request_id is None:
@@ -491,7 +560,10 @@ class OverlayWindow(QWidget):
         这个属性是构造时赋值一次的普通属性，不像 ``main()`` 里的同名局部变量能靠闭包后绑定
         自动生效，需要显式同步。
         """
+        if self._speech_controller is not None:
+            self._speech_controller.audio_level_changed.disconnect(self._on_audio_level_changed)
         self._speech_controller = speech_controller
+        self._connect_speech_controller_audio_level(speech_controller)
 
     def set_voice_input(
         self, voice_capture: PcmAudioCapture | None, stt_worker: SttWorker | None
@@ -519,6 +591,12 @@ class OverlayWindow(QWidget):
             self._speech_controller.stop()
         self._stop_button.setEnabled(False)
 
+    def _on_barge_in_requested(self) -> None:
+        if self._cancellation_gate is not None:
+            self._cancellation_gate.request_stop()
+        if self._speech_controller is not None:
+            self._speech_controller.stop()
+
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         self._state_machine.trigger_transient(PetState.CLICKED, t=self._elapsed())
         if self._actions is None:
@@ -529,6 +607,7 @@ class OverlayWindow(QWidget):
         menu.talk_requested.connect(lambda: self._show_chat_popup(global_pos))
         menu.settings_requested.connect(actions.open_settings)
         menu.memory_requested.connect(actions.open_memory)
+        menu.recollections_requested.connect(actions.open_recollections)
         menu.characters_requested.connect(actions.open_characters)
         menu.quit_requested.connect(actions.quit)
         menu.popup_at(global_pos)
@@ -543,6 +622,7 @@ class OverlayWindow(QWidget):
             self._chat_popup.close()
         popup = ChatPopup(self, voice_capture=self._voice_capture, stt_worker=self._stt_worker)
         popup.text_submitted.connect(self._route_chat_text)
+        popup.barge_in_requested.connect(self._on_barge_in_requested)
         # destroyed 是异步的（deleteLater 到下一轮事件循环才真正回收），旧实例的 destroyed
         # 可能晚于新实例赋值才到达，用身份判断避免把新弹出的 popup 引用误清空。
         popup.destroyed.connect(lambda: self._on_chat_popup_destroyed(popup))

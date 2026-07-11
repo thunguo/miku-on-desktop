@@ -1,5 +1,5 @@
-"""MemoryPanel 的回归测试：四个标签页（语义/情景/情感/原始会话）各自的树形展示、选中加载
-表单、保存/删除语义、搜索过滤。四层存储全是同步实现，测试函数无需 ``asyncio.run()`` 桥接。
+"""MemoryPanel 的回归测试：五个标签页（语义/情景/情感/原始会话/诊断）各自的树形展示、选中
+加载表单、保存/删除语义、搜索过滤。四层存储全是同步实现，测试函数无需 ``asyncio.run()`` 桥接。
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ def _make_fact(
     value: str = "tew",
     extracted_by: str = "tool:remember",
     pinned: bool = False,
+    confidence: float = 1.0,
 ) -> Fact:
     return Fact(
         id="",
@@ -47,7 +48,7 @@ def _make_fact(
         predicate=predicate,
         object=value,
         object_type="concept",
-        confidence=1.0,
+        confidence=confidence,
         source=[],
         valid_from="2026-01-01T00:00:00",
         recorded_at="2026-01-01T00:00:00",
@@ -81,10 +82,10 @@ def _find_leaf_by_id(tree: QTreeWidget, item_id: str) -> QTreeWidgetItem | None:
     return _find_leaf(tree, lambda data: data == item_id)
 
 
-def test_registers_four_sub_interfaces(qapp: QApplication, system: MemorySystem) -> None:
+def test_registers_five_sub_interfaces(qapp: QApplication, system: MemorySystem) -> None:
     panel = MemoryPanel(system)
 
-    assert panel.stackedWidget.count() == 4
+    assert panel.stackedWidget.count() == 5
 
 
 def test_navigation_interface_is_not_hidden_for_multi_tab_panel(
@@ -639,3 +640,62 @@ def test_emotional_save_invalid_json_shows_info_bar_and_does_not_save(
     data = system.emotional.load_preferences()
     assert "habits" not in data
     assert panel.findChildren(InfoBar)
+
+
+# ── 诊断 ─────────────────────────────────────────────────────────────────
+
+
+def test_diagnostics_refresh_shows_current_threshold_values(
+    qapp: QApplication, system: MemorySystem
+) -> None:
+    panel = MemoryPanel(system)
+
+    panel._refresh_diagnostics()
+
+    text = panel._diagnostics_view.toPlainText()
+    assert "0.70" in text
+    assert "0.80" in text
+    assert "0.75" in text
+
+
+def test_diagnostics_counts_facts_filtered_by_retrieval_threshold(
+    qapp: QApplication, system: MemorySystem
+) -> None:
+    system.semantic.upsert_fact(_make_fact(predicate="住在", value="上海", confidence=0.9))
+    system.semantic.upsert_fact(_make_fact(predicate="喜欢", value="猫", confidence=0.5))
+    panel = MemoryPanel(system)
+
+    panel._refresh_diagnostics()
+
+    text = panel._diagnostics_view.toPlainText()
+    assert "活跃语义事实总数：2" in text
+    assert "其中会被检索阈值过滤掉的条数：1" in text
+
+
+def test_diagnostics_counts_duplicate_groups_from_similar_base_units(
+    qapp: QApplication, system: MemorySystem
+) -> None:
+    system.base.append(
+        MemoryUnit(
+            id="",
+            session_id="s1",
+            role="user",
+            content="今天天气真好呀，想出去走走。",
+            created_at="2026-07-06T09:00:00+00:00",
+        )
+    )
+    system.base.append(
+        MemoryUnit(
+            id="",
+            session_id="s1",
+            role="user",
+            content="今天天气真好呀，想出去走走。",
+            created_at="2026-07-06T09:01:00+00:00",
+        )
+    )
+    panel = MemoryPanel(system)
+
+    panel._refresh_diagnostics()
+
+    text = panel._diagnostics_view.toPlainText()
+    assert "疑似重复记忆组数（全库扫描）：1" in text

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import queue
 import random
@@ -44,6 +45,14 @@ class ProactiveTrigger:
     仍然要走完整 run_ai_loop（含人格/工具/记忆）生成，保证语气人设一致。"""
 
     observation: str
+
+
+@dataclass(frozen=True)
+class ProactiveToggleRequest:
+    """托盘"主动交互"开关放入 chat_input 队列的请求：session 级、不持久化，
+    只切换调度器任务的有无，不改变 min_interval_s/quiet_hours 等其余配置字段。"""
+
+    enabled: bool
 
 
 def _parse_hhmm(value: str) -> time:
@@ -160,3 +169,35 @@ async def run_proactive_scheduler(
             day_marker=day_marker,
             now=datetime.now(),
         )
+
+
+async def apply_proactive_toggle(
+    request: ProactiveToggleRequest,
+    current_task: asyncio.Task[None] | None,
+    *,
+    config: ProactiveConfig,
+    router: ModelRouter,
+    providers: dict[ProviderName, Provider],
+    backend: PlatformBackend,
+    chat_input: queue.Queue[object],
+) -> asyncio.Task[None] | None:
+    """把调度器任务调至 ``request.enabled`` 描述的目标状态，幂等——已经在目标状态时不动。"""
+
+    if request.enabled:
+        if current_task is not None:
+            return current_task
+        return asyncio.create_task(
+            run_proactive_scheduler(
+                config=config,
+                router=router,
+                providers=providers,
+                backend=backend,
+                chat_input=chat_input,
+            )
+        )
+    if current_task is None:
+        return None
+    current_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await current_task
+    return None

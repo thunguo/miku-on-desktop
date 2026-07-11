@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QKeySequence
@@ -46,6 +47,7 @@ from miku_on_desk.config.settings import (
     AcpAgentConfig,
     AgentProfileConfig,
     AppSettings,
+    McpAutomationConfig,
     McpServerConfig,
     McpTransport,
     ModelTier,
@@ -56,6 +58,7 @@ from miku_on_desk.config.settings import (
     TTSProviderName,
     save_settings_with_vault,
 )
+from miku_on_desk.face.hooks.schema import known_event_names
 from miku_on_desk.face.ui.theme import RADIUS_MD, WARNING_COLOR
 
 if TYPE_CHECKING:
@@ -82,6 +85,23 @@ _MCP_TRANSPORT_LABELS: dict[McpTransport, str] = {
     McpTransport.STDIO: "本机命令（stdio）",
     McpTransport.SSE: "远程 SSE",
     McpTransport.STREAMABLE_HTTP: "远程 Streamable HTTP",
+}
+
+_MCP_SERVER_TEMPLATE_CUSTOM = "自定义"
+
+_MCP_SERVER_TEMPLATES: dict[str, McpServerConfig] = {
+    "Spotify": McpServerConfig(
+        name="spotify",
+        transport=McpTransport.STDIO,
+        command="npx",
+        args=["-y", "@spotify/mcp-server"],
+    ),
+    "Google Calendar": McpServerConfig(
+        name="google-calendar",
+        transport=McpTransport.STDIO,
+        command="npx",
+        args=["-y", "@google-calendar/mcp-server"],
+    ),
 }
 
 _BUILTIN_TOOLS: list[tuple[str, str]] = [
@@ -215,6 +235,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_api_key_edit = LineEdit(self)
         self._tts_base_url_edit = LineEdit(self)
         self._tts_model_edit = LineEdit(self)
+        self._tts_fallback_enabled_box = CheckBox("合成失败自动降级到 Edge", self)
         self._voice_cloning_api_key_edit = LineEdit(self)
         self._voice_cloning_base_url_edit = LineEdit(self)
         self._voice_input_enabled_box = CheckBox("启用语音输入", self)
@@ -222,7 +243,9 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._voice_input_base_url_edit = LineEdit(self)
         self._voice_input_language_edit = LineEdit(self)
 
-        self._mcp_editor = _McpServerListEditor(self._settings.mcp_servers, self)
+        self._mcp_editor = _McpServerListEditor(
+            self._settings.mcp_servers, self._settings.mcp_automation, self
+        )
         self._agent_editor = _AgentProfileListEditor(self._settings.agent_profiles, self)
         self._acp_editor = _AcpAgentListEditor(self._settings.acp_agents, self)
 
@@ -324,6 +347,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._collect_tts()
         self._collect_voice_cloning()
         self._collect_voice_input()
+        self._settings.mcp_automation = self._mcp_editor.collect_automation()
         return self._settings.model_copy(deep=True)
 
     def _add_numeric_validation(
@@ -454,7 +478,6 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         )
         self._settings.persona = persona
         return persona
-
 
     def _build_permissions_tab(self) -> QWidget:
         container = QWidget(self)
@@ -655,6 +678,13 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         container = QWidget(self)
         form = QFormLayout(container)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow(
+            CaptionLabel(
+                "默认开启；可通过系统托盘图标菜单一键暂停/恢复（仅本次运行生效，不影响这里"
+                "保存的设置）；不会做连续签到或讨要回应式的追问。",
+                container,
+            )
+        )
         form.addRow(self._proactive_enabled_box)
         form.addRow("最小间隔（秒）", self._proactive_min_interval_edit)
         self._proactive_min_interval_warning = self._add_numeric_validation(
@@ -848,9 +878,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._settings.model_router.enable_cross_provider_fallback = (
             self._enable_cross_provider_fallback_box.isChecked()
         )
-        self._settings.hook_server.include_experimental = (
-            self._include_experimental_box.isChecked()
-        )
+        self._settings.hook_server.include_experimental = self._include_experimental_box.isChecked()
 
         loop_behavior = self._settings.loop_behavior
         loop_behavior.max_tool_rounds = _parse_int(
@@ -931,32 +959,29 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_model_edit.setPlaceholderText("tts-1")
         form.addRow("模型（model）", self._tts_model_edit)
 
+        form.addRow(self._tts_fallback_enabled_box)
         form.addRow(
             CaptionLabel(
-                "Edge 免 Key 但必须联网；OpenAI 兼容需填 Key/Base URL；改动需重启 Miku 才能生效",
+                "Edge 免 Key 但必须联网；OpenAI 兼容需填 Key/Base URL；改动需重启 Miku 才能生效；"
+                "「合成失败自动降级到 Edge」开启后若当前引擎能流式播放（如 ElevenLabs），会退化为"
+                "整句合成完才出声",
                 tts_container,
             )
         )
         tts_card.viewLayout.addWidget(tts_container)
         layout.addWidget(tts_card)
 
-        voice_cloning_card = HeaderCardWidget(
-            "声音克隆（ElevenLabs Instant Voice Cloning）", self
-        )
+        voice_cloning_card = HeaderCardWidget("声音克隆（ElevenLabs Instant Voice Cloning）", self)
         voice_cloning_container = QWidget(voice_cloning_card)
         voice_cloning_form = QFormLayout(voice_cloning_container)
-        voice_cloning_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
+        voice_cloning_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self._voice_cloning_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
         self._voice_cloning_api_key_edit.setPlaceholderText("留空则跳过声音克隆")
         voice_cloning_form.addRow("ElevenLabs API Key", self._voice_cloning_api_key_edit)
         self._voice_cloning_base_url_edit.setPlaceholderText(
             "默认官方地址；自定义时不要带 /v1 后缀"
         )
-        voice_cloning_form.addRow(
-            "ElevenLabs API Base URL", self._voice_cloning_base_url_edit
-        )
+        voice_cloning_form.addRow("ElevenLabs API Base URL", self._voice_cloning_base_url_edit)
         voice_cloning_form.addRow(
             CaptionLabel(
                 "跟上方 TTS 播放凭证互相独立，用于「克隆角色」/「更换声音」的录音克隆步骤",
@@ -1016,6 +1041,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         self._tts_api_key_edit.setText(tts.api_key or "")
         self._tts_base_url_edit.setText(tts.base_url or "")
         self._tts_model_edit.setText(tts.model)
+        self._tts_fallback_enabled_box.setChecked(tts.fallback_to_edge)
         self._on_tts_provider_changed(self._tts_provider_combo.currentIndex())
 
     def _collect_tts(self) -> None:
@@ -1029,6 +1055,7 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
         tts.api_key = self._tts_api_key_edit.text().strip() or None
         tts.base_url = self._tts_base_url_edit.text().strip() or None
         tts.model = self._tts_model_edit.text().strip() or defaults.model
+        tts.fallback_to_edge = self._tts_fallback_enabled_box.isChecked()
 
     def _load_voice_cloning(self) -> None:
         voice_cloning = self._settings.voice_cloning
@@ -1037,12 +1064,8 @@ class SettingsPanel(FluentWindow):  # type: ignore[misc]
 
     def _collect_voice_cloning(self) -> None:
         voice_cloning = self._settings.voice_cloning
-        voice_cloning.elevenlabs_api_key = (
-            self._voice_cloning_api_key_edit.text().strip() or None
-        )
-        voice_cloning.elevenlabs_base_url = (
-            self._voice_cloning_base_url_edit.text().strip() or None
-        )
+        voice_cloning.elevenlabs_api_key = self._voice_cloning_api_key_edit.text().strip() or None
+        voice_cloning.elevenlabs_base_url = self._voice_cloning_base_url_edit.text().strip() or None
 
     def _load_voice_input(self) -> None:
         voice_input = self._settings.voice_input
@@ -1099,6 +1122,16 @@ def _is_valid_float(text: str) -> bool:
         return False
 
 
+def _parse_json_dict(text: str, default: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return default
+    if not isinstance(parsed, dict):
+        return default
+    return parsed
+
+
 def _confirm_delete(parent: QWidget, name: str) -> bool:
     box = MessageBox("确认删除", f"确定要删除「{name}」吗？此操作不可撤销。", parent)
     return bool(box.exec())
@@ -1109,7 +1142,12 @@ class _McpServerListEditor(QWidget):
     选中列表项决定追加还是覆盖 ``configs`` 里的对应条目。
     """
 
-    def __init__(self, configs: list[McpServerConfig], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        configs: list[McpServerConfig],
+        automation: McpAutomationConfig,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._configs = configs
 
@@ -1130,6 +1168,16 @@ class _McpServerListEditor(QWidget):
         self._trusted_box = CheckBox(
             "信任此 MCP server（豁免确认，但仍受路径沙箱/先读后改限制）", self
         )
+
+        self._template_combo = ComboBox(self)
+        self._template_combo.addItem(_MCP_SERVER_TEMPLATE_CUSTOM)
+        for template_name in _MCP_SERVER_TEMPLATES:
+            self._template_combo.addItem(template_name)
+        template_button = PushButton("填充模板", self)
+        template_button.clicked.connect(self._on_fill_template)
+        template_row = QHBoxLayout()
+        template_row.addWidget(self._template_combo)
+        template_row.addWidget(template_button)
 
         self._form = QFormLayout()
         self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -1153,13 +1201,76 @@ class _McpServerListEditor(QWidget):
         button_row.addWidget(add_button)
         button_row.addWidget(remove_button)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._list)
-        layout.addLayout(self._form)
-        layout.addLayout(button_row)
+        self._automation_trigger_combo = ComboBox(self)
+        for event_name in known_event_names():
+            self._automation_trigger_combo.addItem(event_name)
+        self._automation_server_edit = LineEdit(self)
+        self._automation_tool_edit = LineEdit(self)
+        self._automation_input_edit = PlainTextEdit(self)
+        self._automation_enabled_box = CheckBox("启用", self)
+
+        automation_form = QFormLayout()
+        automation_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        automation_form.addRow("触发事件", self._automation_trigger_combo)
+        automation_form.addRow("Server 名称", self._automation_server_edit)
+        automation_form.addRow("工具名称", self._automation_tool_edit)
+        automation_form.addRow("工具参数（JSON）", self._automation_input_edit)
+        automation_form.addRow(self._automation_enabled_box)
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.addLayout(template_row)
+        container_layout.addWidget(self._list)
+        container_layout.addLayout(self._form)
+        container_layout.addLayout(button_row)
+        container_layout.addWidget(
+            CaptionLabel("自动化：检测到指定 hook 事件时自动调用一次 MCP 工具", container)
+        )
+        container_layout.addLayout(automation_form)
+        container_layout.addStretch(1)
+
+        scroll_area = SingleDirectionScrollArea(self)
+        scroll_area.setWidget(container)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea{background: transparent; border: none}")
+        container.setStyleSheet("QWidget{background: transparent}")
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(scroll_area)
 
         self._refresh_list()
         self._on_transport_changed(self._transport_combo.currentIndex())
+        self.load_automation(automation)
+
+    def _on_fill_template(self) -> None:
+        template_name = self._template_combo.currentText()
+        template = _MCP_SERVER_TEMPLATES.get(template_name)
+        if template is None:
+            return
+        self._name_edit.setText(template.name)
+        self._transport_combo.setCurrentIndex(list(McpTransport).index(template.transport))
+        self._command_edit.setText(template.command or "")
+        self._args_edit.setText(_list_to_csv(template.args))
+
+    def load_automation(self, config: McpAutomationConfig) -> None:
+        index = self._automation_trigger_combo.findText(config.trigger_event)
+        self._automation_trigger_combo.setCurrentIndex(max(index, 0))
+        self._automation_server_edit.setText(config.server_name)
+        self._automation_tool_edit.setText(config.tool_name)
+        self._automation_input_edit.setPlainText(
+            json.dumps(config.tool_input, ensure_ascii=False, indent=2)
+        )
+        self._automation_enabled_box.setChecked(config.enabled)
+
+    def collect_automation(self) -> McpAutomationConfig:
+        return McpAutomationConfig(
+            enabled=self._automation_enabled_box.isChecked(),
+            trigger_event=self._automation_trigger_combo.currentText(),
+            server_name=self._automation_server_edit.text().strip(),
+            tool_name=self._automation_tool_edit.text().strip(),
+            tool_input=_parse_json_dict(self._automation_input_edit.toPlainText(), {}),
+        )
 
     def _on_transport_changed(self, index: int) -> None:
         transport = list(McpTransport)[index]

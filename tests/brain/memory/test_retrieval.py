@@ -117,14 +117,54 @@ def test_retrieve_hints_empty_query_yields_no_hints(
     semantic: SemanticStore, episodic: EpisodicStore, emotional: EmotionalStore
 ) -> None:
     semantic.upsert_fact(_fact())
-    episodic.append_event(
-        title="标题", summary="摘要", occurred_at="2026-07-06T09:00:00+00:00"
-    )
+    episodic.append_event(title="标题", summary="摘要", occurred_at="2026-07-06T09:00:00+00:00")
     emotional.save_preferences({"a": "b"})
 
     hints = retrieve_hints(semantic=semantic, episodic=episodic, emotional=emotional, query="")
 
     assert hints == []
+
+
+def test_retrieve_hints_default_min_confidence_excludes_fact_at_legacy_threshold(
+    semantic: SemanticStore, episodic: EpisodicStore, emotional: EmotionalStore
+) -> None:
+    semantic.upsert_fact(_fact(object_="上海", confidence=0.7))
+
+    hints = retrieve_hints(semantic=semantic, episodic=episodic, emotional=emotional, query="上海")
+
+    assert hints == []
+
+
+def test_retrieve_hints_custom_min_confidence_filters_more_aggressively(
+    semantic: SemanticStore, episodic: EpisodicStore, emotional: EmotionalStore
+) -> None:
+    semantic.upsert_fact(_fact(object_="上海", confidence=0.85))
+
+    hints = retrieve_hints(
+        semantic=semantic,
+        episodic=episodic,
+        emotional=emotional,
+        query="上海",
+        min_confidence=0.9,
+    )
+
+    assert hints == []
+
+
+def test_retrieve_hints_custom_min_confidence_still_includes_high_confidence_fact(
+    semantic: SemanticStore, episodic: EpisodicStore, emotional: EmotionalStore
+) -> None:
+    semantic.upsert_fact(_fact(object_="上海", confidence=0.95))
+
+    hints = retrieve_hints(
+        semantic=semantic,
+        episodic=episodic,
+        emotional=emotional,
+        query="上海",
+        min_confidence=0.9,
+    )
+
+    assert any(hint.label == "语义" and "上海" in hint.text for hint in hints)
 
 
 # ── retrieve ─────────────────────────────────────────────────────────────
@@ -193,9 +233,7 @@ def test_retrieve_truncates_semantic_section_to_token_budget(
     semantic: SemanticStore, episodic: EpisodicStore, emotional: EmotionalStore
 ) -> None:
     for i in range(50):
-        semantic.upsert_fact(
-            _fact(predicate="喜欢", object_=f"事物{i:03d}" * 10, confidence=0.9)
-        )
+        semantic.upsert_fact(_fact(predicate="喜欢", object_=f"事物{i:03d}" * 10, confidence=0.9))
 
     text = retrieve(
         semantic=semantic, episodic=episodic, emotional=emotional, query="喜欢", token_budget=100

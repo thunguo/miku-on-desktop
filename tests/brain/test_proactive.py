@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import queue
 from datetime import date, datetime, time
 from typing import Any
@@ -10,6 +11,7 @@ import pytest
 
 from miku_on_desk.brain.model_router import ModelRouter
 from miku_on_desk.brain.proactive import (
+    ProactiveToggleRequest,
     ProactiveTrigger,
     _in_quiet_hours,
     _is_quiet_now,
@@ -17,6 +19,7 @@ from miku_on_desk.brain.proactive import (
     _parse_hhmm,
     _peek_and_decide,
     _run_one_iteration,
+    apply_proactive_toggle,
 )
 from miku_on_desk.brain.providers.base import (
     Message,
@@ -88,9 +91,7 @@ class _FakeBackend(PlatformBackend):
 
 def _make_router() -> ModelRouter:
     config = ModelRouterConfig()
-    config.anthropic = ProviderConfig(
-        api_key="sk-ant", models={ModelTier.FAST: "claude-fake-fast"}
-    )
+    config.anthropic = ProviderConfig(api_key="sk-ant", models={ModelTier.FAST: "claude-fake-fast"})
     return ModelRouter(config)
 
 
@@ -346,3 +347,116 @@ async def test_run_one_iteration_puts_trigger_and_increments_count_on_success(
     assert daily_count == 1
     assert day_marker == date(2026, 7, 5)
     assert chat_input.get_nowait() == ProactiveTrigger(observation="用户在看教程视频")
+
+
+async def test_apply_proactive_toggle_starts_scheduler_when_none_running(
+    chat_input: queue.Queue[object],
+) -> None:
+    config = ProactiveConfig()
+    router = _make_router()
+    backend = _FakeBackend()
+
+    task = await apply_proactive_toggle(
+        ProactiveToggleRequest(enabled=True),
+        None,
+        config=config,
+        router=router,
+        providers={},
+        backend=backend,
+        chat_input=chat_input,
+    )
+
+    try:
+        assert task is not None
+        assert not task.done()
+    finally:
+        assert task is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_apply_proactive_toggle_keeps_existing_task_when_already_running(
+    chat_input: queue.Queue[object],
+) -> None:
+    config = ProactiveConfig()
+    router = _make_router()
+    backend = _FakeBackend()
+    existing_task = await apply_proactive_toggle(
+        ProactiveToggleRequest(enabled=True),
+        None,
+        config=config,
+        router=router,
+        providers={},
+        backend=backend,
+        chat_input=chat_input,
+    )
+
+    try:
+        result = await apply_proactive_toggle(
+            ProactiveToggleRequest(enabled=True),
+            existing_task,
+            config=config,
+            router=router,
+            providers={},
+            backend=backend,
+            chat_input=chat_input,
+        )
+
+        assert result is existing_task
+    finally:
+        assert existing_task is not None
+        existing_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await existing_task
+
+
+async def test_apply_proactive_toggle_cancels_running_task_when_disabled(
+    chat_input: queue.Queue[object],
+) -> None:
+    config = ProactiveConfig()
+    router = _make_router()
+    backend = _FakeBackend()
+    running_task = await apply_proactive_toggle(
+        ProactiveToggleRequest(enabled=True),
+        None,
+        config=config,
+        router=router,
+        providers={},
+        backend=backend,
+        chat_input=chat_input,
+    )
+
+    result = await apply_proactive_toggle(
+        ProactiveToggleRequest(enabled=False),
+        running_task,
+        config=config,
+        router=router,
+        providers={},
+        backend=backend,
+        chat_input=chat_input,
+    )
+
+    assert result is None
+    assert running_task is not None
+    assert running_task.cancelled()
+
+
+async def test_apply_proactive_toggle_is_noop_when_disabled_and_no_task(
+    chat_input: queue.Queue[object],
+) -> None:
+    config = ProactiveConfig()
+    router = _make_router()
+    backend = _FakeBackend()
+
+    result = await apply_proactive_toggle(
+        ProactiveToggleRequest(enabled=False),
+        None,
+        config=config,
+        router=router,
+        providers={},
+        backend=backend,
+        chat_input=chat_input,
+    )
+
+    assert result is None

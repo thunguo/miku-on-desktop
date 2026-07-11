@@ -86,9 +86,7 @@ def test_default_memory_system_falls_back_to_bootstrap_data_dir(tmp_path: Path) 
 
 
 def test_memory_system_threads_tuning_into_base_and_emotional_stores(tmp_path: Path) -> None:
-    tuning = MemoryTuningConfig(
-        base_similarity_threshold=0.42, emotional_confidence_threshold=0.13
-    )
+    tuning = MemoryTuningConfig(base_similarity_threshold=0.42, emotional_confidence_threshold=0.13)
 
     system = MemorySystem(tmp_path / "memory", tuning=tuning)
 
@@ -108,17 +106,38 @@ def test_memory_system_without_explicit_tuning_uses_config_defaults(tmp_path: Pa
     )
 
 
+def test_tuning_property_returns_constructed_config(tmp_path: Path) -> None:
+    tuning = MemoryTuningConfig(retrieval_min_confidence=0.42)
+
+    system = MemorySystem(tmp_path / "memory", tuning=tuning)
+
+    assert system.tuning is tuning
+
+
 # ── add_memory_unit ──────────────────────────────────────────────────────
 
 
 def test_add_memory_unit_delegates_to_base_store(system: MemorySystem) -> None:
-    unit_id = system.add_memory_unit(
-        _unit(content="你好", created_at="2026-07-06T09:00:00+00:00")
-    )
+    unit_id = system.add_memory_unit(_unit(content="你好", created_at="2026-07-06T09:00:00+00:00"))
 
     loaded = system.base.load(unit_id)
     assert loaded is not None
     assert loaded.content == "你好"
+
+
+def test_add_memory_unit_writes_similar_units_in_same_session_without_skipping(
+    system: MemorySystem,
+) -> None:
+    first_id = system.add_memory_unit(
+        _unit(content="今天天气真好呀，想出去走走。", created_at="2026-07-06T09:00:00+00:00")
+    )
+    second_id = system.add_memory_unit(
+        _unit(content="今天天气真好呀，想出去走走。", created_at="2026-07-06T09:01:00+00:00")
+    )
+
+    assert first_id != second_id
+    assert system.base.load(first_id) is not None
+    assert system.base.load(second_id) is not None
 
 
 # ── remember/recall ──────────────────────────────────────────────────────
@@ -214,6 +233,44 @@ def test_retrieve_uses_configured_min_confidence_threshold(tmp_path: Path) -> No
     assert "上海" in lenient_system.retrieve("上海")
 
 
+def test_recall_uses_configured_min_confidence_threshold(tmp_path: Path) -> None:
+    now = "2026-07-06T09:00:00+00:00"
+    low_confidence_fact = _make_fact(
+        subject="用户", predicate="住在", object_="上海", confidence=0.3, now=now
+    )
+
+    strict_system = MemorySystem(
+        tmp_path / "strict", tuning=MemoryTuningConfig(retrieval_min_confidence=0.5)
+    )
+    strict_system.semantic.upsert_fact(low_confidence_fact)
+    assert not any("上海" in hint.text for hint in strict_system.recall("上海"))
+
+    lenient_system = MemorySystem(
+        tmp_path / "lenient", tuning=MemoryTuningConfig(retrieval_min_confidence=0.1)
+    )
+    lenient_system.semantic.upsert_fact(low_confidence_fact)
+    assert any("上海" in hint.text for hint in lenient_system.recall("上海"))
+
+
+def test_retrieve_hints_method_uses_configured_min_confidence_threshold(tmp_path: Path) -> None:
+    now = "2026-07-06T09:00:00+00:00"
+    low_confidence_fact = _make_fact(
+        subject="用户", predicate="住在", object_="上海", confidence=0.3, now=now
+    )
+
+    strict_system = MemorySystem(
+        tmp_path / "strict", tuning=MemoryTuningConfig(retrieval_min_confidence=0.5)
+    )
+    strict_system.semantic.upsert_fact(low_confidence_fact)
+    assert strict_system.retrieve_hints("上海") == []
+
+    lenient_system = MemorySystem(
+        tmp_path / "lenient", tuning=MemoryTuningConfig(retrieval_min_confidence=0.1)
+    )
+    lenient_system.semantic.upsert_fact(low_confidence_fact)
+    assert any(hint.label == "语义" for hint in lenient_system.retrieve_hints("上海"))
+
+
 # ── run_consolidation ────────────────────────────────────────────────────
 
 
@@ -269,7 +326,11 @@ def test_run_consolidation_archives_superseded_facts(system: MemorySystem) -> No
     now = "2026-07-06T09:00:00+00:00"
     system.semantic.upsert_fact(
         _make_fact(
-            subject="用户", predicate="住在", object_="上海", confidence=0.5, now=now,
+            subject="用户",
+            predicate="住在",
+            object_="上海",
+            confidence=0.5,
+            now=now,
             status="superseded",
         )
     )

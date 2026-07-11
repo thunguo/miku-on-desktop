@@ -40,17 +40,19 @@ def _key_event(key: Qt.Key) -> QKeyEvent:
 @pytest.mark.parametrize(
     ("angle", "expected"),
     [
-        (36, "talk"),
+        (30, "talk"),
         (0, "talk"),
-        (71, "talk"),
-        (73, "settings"),
-        (108, "settings"),
-        (145, "memory"),
-        (180, "memory"),
-        (217, "characters"),
-        (252, "characters"),
-        (289, "quit"),
-        (324, "quit"),
+        (59, "talk"),
+        (61, "settings"),
+        (90, "settings"),
+        (121, "memory"),
+        (150, "memory"),
+        (181, "recollections"),
+        (210, "recollections"),
+        (241, "characters"),
+        (270, "characters"),
+        (301, "quit"),
+        (330, "quit"),
         (359, "quit"),
     ],
 )
@@ -82,9 +84,7 @@ def test_click_in_talk_sector_emits_talk_requested(qapp: QApplication) -> None:
     fired: list[None] = []
     menu.talk_requested.connect(lambda: fired.append(None))
 
-    menu.mouseReleaseEvent(
-        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(36, _MID_RADIUS))
-    )
+    menu.mouseReleaseEvent(_mouse_event(QEvent.Type.MouseButtonRelease, _point_at(30, _MID_RADIUS)))
 
     assert fired == [None]
 
@@ -94,9 +94,7 @@ def test_click_in_settings_sector_emits_settings_requested(qapp: QApplication) -
     fired: list[None] = []
     menu.settings_requested.connect(lambda: fired.append(None))
 
-    menu.mouseReleaseEvent(
-        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(108, _MID_RADIUS))
-    )
+    menu.mouseReleaseEvent(_mouse_event(QEvent.Type.MouseButtonRelease, _point_at(90, _MID_RADIUS)))
 
     assert fired == [None]
 
@@ -107,7 +105,21 @@ def test_click_in_memory_sector_emits_memory_requested(qapp: QApplication) -> No
     menu.memory_requested.connect(lambda: fired.append(None))
 
     menu.mouseReleaseEvent(
-        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(180, _MID_RADIUS))
+        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(150, _MID_RADIUS))
+    )
+
+    assert fired == [None]
+
+
+def test_click_in_recollections_sector_emits_recollections_requested(
+    qapp: QApplication,
+) -> None:
+    menu = RadialMenu()
+    fired: list[None] = []
+    menu.recollections_requested.connect(lambda: fired.append(None))
+
+    menu.mouseReleaseEvent(
+        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(210, _MID_RADIUS))
     )
 
     assert fired == [None]
@@ -119,7 +131,7 @@ def test_click_in_characters_sector_emits_characters_requested(qapp: QApplicatio
     menu.characters_requested.connect(lambda: fired.append(None))
 
     menu.mouseReleaseEvent(
-        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(252, _MID_RADIUS))
+        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(270, _MID_RADIUS))
     )
 
     assert fired == [None]
@@ -131,7 +143,7 @@ def test_click_in_quit_sector_emits_quit_requested(qapp: QApplication) -> None:
     menu.quit_requested.connect(lambda: fired.append(None))
 
     menu.mouseReleaseEvent(
-        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(324, _MID_RADIUS))
+        _mouse_event(QEvent.Type.MouseButtonRelease, _point_at(330, _MID_RADIUS))
     )
 
     assert fired == [None]
@@ -143,6 +155,7 @@ def test_click_in_center_hole_emits_no_signal(qapp: QApplication) -> None:
     menu.talk_requested.connect(lambda: fired.append(None))
     menu.settings_requested.connect(lambda: fired.append(None))
     menu.memory_requested.connect(lambda: fired.append(None))
+    menu.recollections_requested.connect(lambda: fired.append(None))
     menu.characters_requested.connect(lambda: fired.append(None))
     menu.quit_requested.connect(lambda: fired.append(None))
 
