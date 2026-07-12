@@ -30,6 +30,7 @@ from miku_on_desk.config.settings import (
     load_settings_with_vault,
     save_settings_with_vault,
 )
+from miku_on_desk.hardware.kiosk_config import KioskConfig
 
 
 def _make_vault(tmp_path: Path) -> SecretVault:
@@ -688,3 +689,24 @@ def test_load_settings_with_vault_roundtrips_after_save(tmp_path: Path) -> None:
         assert on_disk["model_router"]["openai"]["api_key"].startswith("vault-ref:")
     finally:
         vault.close()
+
+
+def test_kiosk_config_defaults_to_xff() -> None:
+    assert KioskConfig().default_pet == "xff"
+
+
+def test_kiosk_config_defaults_to_scaled_up_and_rotated() -> None:
+    config = KioskConfig()
+    assert config.character_scale == 2.5
+    assert config.rotate_90_clockwise is True
+
+
+def test_app_settings_kiosk_roundtrip_through_save_and_load(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.kiosk.default_pet = "miku_pixel"
+
+    path = tmp_path / "settings.json"
+    settings.save(path)
+    loaded = AppSettings.load(path)
+
+    assert loaded.kiosk.default_pet == "miku_pixel"

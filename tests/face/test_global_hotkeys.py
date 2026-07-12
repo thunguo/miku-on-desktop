@@ -156,3 +156,21 @@ def test_close_stops_and_joins_listener(qapp: QApplication) -> None:
 
     assert listener.stopped == 1
     assert listener.joined == 1
+
+
+def test_rebind_degrades_without_crashing_when_listener_start_raises(
+    qapp: QApplication,
+) -> None:
+    class _BrokenGlobalHotKeys(_FakeGlobalHotKeys):
+        def start(self) -> None:
+            raise OSError("没有可用的键盘设备")
+
+    manager = GlobalHotKeyManager()
+
+    # Linux 触屏一体机上大概率没有物理键盘，全局热键初始化失败不应该拖垮应用启动。
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(global_hotkeys, "GlobalHotKeys", _BrokenGlobalHotKeys)
+        manager.rebind({"open_chat": "Ctrl+Shift+M"})
+
+    manager.close()
+

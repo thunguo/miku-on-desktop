@@ -1,0 +1,30 @@
+[Unit]
+Description=Miku on Desk direct-framebuffer kiosk
+After=local-fs.target network-online.target
+Wants=network-online.target
+Conflicts=display-manager.service
+ConditionPathExists=/dev/fb0
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=thunguo
+Group=thunguo
+WorkingDirectory=/home/thunguo/miku-on-desk
+Environment=QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0:tty=/dev/tty1
+Environment=QT_QPA_FB_FORCE_FULLSCREEN=1
+Environment=QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=/dev/input/event4:rotate=90
+ExecStartPre=/usr/bin/test -r /dev/fb0
+ExecStartPre=/usr/bin/test -r /dev/input/event4
+ExecStart=/home/thunguo/miku-on-desk/.venv/bin/miku-on-desk-kiosk
+Restart=on-failure
+RestartSec=3
+SupplementaryGroups=video input audio dialout render
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target

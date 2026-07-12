@@ -8,6 +8,14 @@
 至少有一个非修饰键不在 ``_MAC_CTRL_KEEP``（mac 原生 Control 已有含义的键，如方向键/Tab/Esc）
 时才重映射——这样能保留 mac 原生 Ctrl+Tab 之类的快捷键，同时把 Windows/Linux 风格的 Ctrl+C
 正确翻译成 Cmd+C。
+
+pynput 在 Linux 上仅仅 ``import pynput``（哪怕只是 ``from pynput.keyboard import ...``）
+就会立刻尝试连接 X11、连不上就直接抛异常整体导入失败——不需要等到真正构造 ``Controller``
+才失败。这会波及所有 import 这个模块的调用方（``backend.py`` → ``main.py`` →
+``cli.py``），导致 kiosk 硬件端还没跑起来 X 会话/触屏驱动之前，连纯文本的 CLI 测试入口
+都跑不起来。因此这里把 pynput 相关的 import 与对象构造都推迟到 ``_ensure_backend()``，
+只在真正需要点击/按键（调用 ``click``/``press_keys``/``_resolve_key``）时才触发，让
+merely importing 这个模块本身不依赖任何显示环境。
 """
 
 from __future__ import annotations
@@ -15,48 +23,66 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Sequence
+from typing import Any
 
 import pyperclip
-from pynput.keyboard import Controller as KeyboardController
-from pynput.keyboard import Key
-from pynput.mouse import Button
-from pynput.mouse import Controller as MouseController
 
-_mouse = MouseController()
-_keyboard = KeyboardController()
+_mouse: Any = None
+_keyboard: Any = None
+_mouse_left_button: Any = None
+_key_map: dict[str, Any] | None = None
 
-_KEY_MAP: dict[str, Key] = {
-    "alt": Key.alt,
-    "alt_r": Key.alt_r,
-    "backspace": Key.backspace,
-    "caps_lock": Key.caps_lock,
-    "cmd": Key.cmd,
-    "command": Key.cmd,
-    "win": Key.cmd,
-    "super": Key.cmd,
-    "cmd_r": Key.cmd_r,
-    "ctrl": Key.ctrl,
-    "control": Key.ctrl,
-    "ctrl_r": Key.ctrl_r,
-    "delete": Key.delete,
-    "down": Key.down,
-    "end": Key.end,
-    "enter": Key.enter,
-    "return": Key.enter,
-    "esc": Key.esc,
-    "escape": Key.esc,
-    "home": Key.home,
-    "left": Key.left,
-    "page_down": Key.page_down,
-    "page_up": Key.page_up,
-    "right": Key.right,
-    "shift": Key.shift,
-    "shift_r": Key.shift_r,
-    "space": Key.space,
-    "tab": Key.tab,
-    "up": Key.up,
-    **{f"f{i}": getattr(Key, f"f{i}") for i in range(1, 21)},
-}
+
+def _ensure_backend() -> None:
+    global _mouse, _keyboard, _mouse_left_button, _key_map
+    if _mouse is not None and _keyboard is not None and _key_map is not None:
+        return
+
+    from pynput.keyboard import Controller as KeyboardController
+    from pynput.keyboard import Key
+    from pynput.mouse import Button
+    from pynput.mouse import Controller as MouseController
+
+    if _mouse is None:
+        _mouse = MouseController()
+    if _keyboard is None:
+        _keyboard = KeyboardController()
+    if _mouse_left_button is None:
+        _mouse_left_button = Button.left
+    if _key_map is None:
+        _key_map = {
+            "alt": Key.alt,
+            "alt_r": Key.alt_r,
+            "backspace": Key.backspace,
+            "caps_lock": Key.caps_lock,
+            "cmd": Key.cmd,
+            "command": Key.cmd,
+            "win": Key.cmd,
+            "super": Key.cmd,
+            "cmd_r": Key.cmd_r,
+            "ctrl": Key.ctrl,
+            "control": Key.ctrl,
+            "ctrl_r": Key.ctrl_r,
+            "delete": Key.delete,
+            "down": Key.down,
+            "end": Key.end,
+            "enter": Key.enter,
+            "return": Key.enter,
+            "esc": Key.esc,
+            "escape": Key.esc,
+            "home": Key.home,
+            "left": Key.left,
+            "page_down": Key.page_down,
+            "page_up": Key.page_up,
+            "right": Key.right,
+            "shift": Key.shift,
+            "shift_r": Key.shift_r,
+            "space": Key.space,
+            "tab": Key.tab,
+            "up": Key.up,
+            **{f"f{i}": getattr(Key, f"f{i}") for i in range(1, 21)},
+        }
+
 
 _MODIFIER_NAMES = {"ctrl", "ctrl_r", "cmd", "cmd_r", "alt", "alt_r", "shift", "shift_r"}
 
@@ -95,8 +121,10 @@ def _remap_ctrl_to_cmd_for_mac(keys: Sequence[str]) -> list[str]:
     return ["cmd" if k == "ctrl" else k for k in lowered]
 
 
-def _resolve_key(name: str) -> Key | str:
-    mapped = _KEY_MAP.get(name.lower())
+def _resolve_key(name: str) -> Any:
+    _ensure_backend()
+    assert _key_map is not None
+    mapped = _key_map.get(name.lower())
     if mapped is not None:
         return mapped
     if len(name) == 1:
@@ -105,8 +133,9 @@ def _resolve_key(name: str) -> Key | str:
 
 
 def click(x: int, y: int) -> None:
+    _ensure_backend()
     _mouse.position = (x, y)
-    _mouse.click(Button.left, 1)
+    _mouse.click(_mouse_left_button, 1)
 
 
 def press_keys(keys: Sequence[str]) -> None:

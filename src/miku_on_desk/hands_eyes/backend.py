@@ -20,6 +20,7 @@ from typing import Any
 
 import psutil
 
+from miku_on_desk.brain.tools.registry import ToolExecutionError
 from miku_on_desk.hands_eyes import input_injector
 
 
@@ -151,14 +152,39 @@ class WindowsBackend(PlatformBackend):
         return accessibility.get_foreground_app_info()
 
 
+class NullBackend(PlatformBackend):
+    """Linux（树莓派 kiosk）上的占位实现：没有 accessibility API 可用，所有查询类方法
+    返回"什么都没找到"而不是抛异常，让 ``computer_input``/``screen_analyze`` 工具能正常
+    注册、被调用后安全地返回空结果，不拖垮整个 Brain 线程。``open_app`` 是唯一做不到
+    "安全空实现"的操作——没有本机窗口系统可以唤起应用，直接抛 ``ToolExecutionError``
+    让调用方知道这个操作在当前平台不支持，而不是伪装成功。"""
+
+    def list_elements(self, pid: int) -> list[UIElement]:
+        return []
+
+    def get_window_bounds(self, pid: int) -> tuple[int, int, int, int] | None:
+        return None
+
+    def open_app(self, name: str) -> None:
+        raise ToolExecutionError(f"当前平台不支持打开应用：{name}")
+
+    def get_idle_seconds(self) -> float:
+        return float("inf")
+
+    def get_foreground_app_info(self) -> ForegroundAppInfo | None:
+        return None
+
+
 def create_platform_backend() -> PlatformBackend:
     """按当前操作系统选择具体实现。
 
     平台专属依赖（pyobjc/uiautomation）只在对应分支内导入，避免在错误的操作系统上
     因缺少依赖而导入失败——两者都是可选依赖，只在匹配的 sys_platform 下才会被安装。
+    其余平台（Linux，即树莓派 kiosk）先用 ``NullBackend`` 占位，等 Phase 4 的
+    ``CaptureCardBackend``（HDMI 采集卡 + USB HID 注入）实现后再按配置切换。
     """
     if sys.platform == "darwin":
         return MacOSBackend()
     if sys.platform == "win32":
         return WindowsBackend()
-    raise RuntimeError(f"不支持的操作系统：{sys.platform}")
+    return NullBackend()

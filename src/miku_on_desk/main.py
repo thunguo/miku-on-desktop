@@ -589,6 +589,88 @@ def _run_brain_thread(
             attempt += 1
 
 
+@dataclass
+class AppConfig:
+    """纯文件 I/O 的结果：读环境变量、加载并解密配置。不依赖任何 Qt 组件，
+    ``main()``/``kiosk_main.py``/``cli.py`` 三个入口都可以在创建
+    QApplication/QCoreApplication 之前调用。"""
+
+    bootstrap: EnvBootstrap
+    settings_path: Path
+    vault: SecretVault
+    settings: AppSettings
+
+
+def load_app_config() -> AppConfig:
+    bootstrap = EnvBootstrap()
+    setup_logging(bootstrap.resolve_log_dir(), level=bootstrap.log_level)
+
+    settings_path = default_settings_path(bootstrap)
+    vault = SecretVault(*default_vault_paths(bootstrap))
+    settings = load_settings_with_vault(settings_path, vault)
+
+    return AppConfig(
+        bootstrap=bootstrap, settings_path=settings_path, vault=vault, settings=settings
+    )
+
+
+@dataclass
+class BrainRuntime:
+    """Brain 跨线程通信原语 + 已启动的 Brain 后台线程。``event_bus`` 是 QObject，
+    构造前调用方必须已创建 QApplication/QCoreApplication 实例——``BrainEventBus`` 的
+    跨线程信号依赖 Qt 的事件循环才能被正确派发到 QueuedConnection。"""
+
+    event_bus: BrainEventBus
+    confirm_gate: ConfirmationGate
+    cancellation_gate: CancellationGate
+    message_queue: QueuedMessageQueue
+    chat_input: queue.Queue[object]
+    session_id: str
+    memory_system: MemorySystem
+    brain_thread: threading.Thread
+
+
+def start_brain_runtime(config: AppConfig) -> BrainRuntime:
+    event_bus = BrainEventBus()
+    confirm_gate = ConfirmationGate(event_bus)
+    cancellation_gate = CancellationGate()
+    message_queue = QueuedMessageQueue()
+    chat_input: queue.Queue[object] = queue.Queue()
+    session_id = uuid.uuid4().hex
+
+    memory_system = default_memory_system(
+        config.settings.memory_dir, config.bootstrap, tuning=config.settings.memory_tuning
+    )
+
+    brain_thread = threading.Thread(
+        target=_run_brain_thread,
+        kwargs={
+            "settings": config.settings,
+            "bootstrap": config.bootstrap,
+            "event_bus": event_bus,
+            "confirm_gate": confirm_gate,
+            "cancellation_gate": cancellation_gate,
+            "message_queue": message_queue,
+            "chat_input": chat_input,
+            "session_id": session_id,
+            "memory_system": memory_system,
+        },
+        daemon=True,
+    )
+    brain_thread.start()
+
+    return BrainRuntime(
+        event_bus=event_bus,
+        confirm_gate=confirm_gate,
+        cancellation_gate=cancellation_gate,
+        message_queue=message_queue,
+        chat_input=chat_input,
+        session_id=session_id,
+        memory_system=memory_system,
+        brain_thread=brain_thread,
+    )
+
+
 def _assets_pets_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "assets" / "pets"
 
@@ -1096,12 +1178,11 @@ def _build_tray_icon(
 
 
 def main() -> None:
-    bootstrap = EnvBootstrap()
-    setup_logging(bootstrap.resolve_log_dir(), level=bootstrap.log_level)
-
-    settings_path = default_settings_path(bootstrap)
-    vault = SecretVault(*default_vault_paths(bootstrap))
-    settings = load_settings_with_vault(settings_path, vault)
+    config = load_app_config()
+    bootstrap = config.bootstrap
+    settings_path = config.settings_path
+    vault = config.vault
+    settings = config.settings
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1110,12 +1191,14 @@ def main() -> None:
     app.setAttribute(Qt.ApplicationAttribute.AA_MacDontSwapCtrlAndMeta, True)
     apply_fluent_theme()
 
-    event_bus = BrainEventBus()
-    confirm_gate = ConfirmationGate(event_bus)
-    cancellation_gate = CancellationGate()
-    message_queue = QueuedMessageQueue()
-    chat_input: queue.Queue[object] = queue.Queue()
-    session_id = uuid.uuid4().hex
+    runtime = start_brain_runtime(config)
+    event_bus = runtime.event_bus
+    confirm_gate = runtime.confirm_gate
+    cancellation_gate = runtime.cancellation_gate
+    message_queue = runtime.message_queue
+    chat_input = runtime.chat_input
+    memory_system = runtime.memory_system
+    brain_thread = runtime.brain_thread
 
     hook_bus = HookEventBus()
     hook_server = _start_hook_server(settings.hook_server, bootstrap, hook_bus)
@@ -1131,27 +1214,6 @@ def main() -> None:
     relationship_store = RelationshipStore(
         bootstrap.resolve_data_dir() / "character_relationships.json"
     )
-
-    memory_system = default_memory_system(
-        settings.memory_dir, bootstrap, tuning=settings.memory_tuning
-    )
-
-    brain_thread = threading.Thread(
-        target=_run_brain_thread,
-        kwargs={
-            "settings": settings,
-            "bootstrap": bootstrap,
-            "event_bus": event_bus,
-            "confirm_gate": confirm_gate,
-            "cancellation_gate": cancellation_gate,
-            "message_queue": message_queue,
-            "chat_input": chat_input,
-            "session_id": session_id,
-            "memory_system": memory_system,
-        },
-        daemon=True,
-    )
-    brain_thread.start()
 
     open_windows: list[QWidget] = []
 
