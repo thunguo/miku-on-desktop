@@ -43,6 +43,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from miku_on_desk.face.ui.theme import RADIUS_MD, TEAL_DARK, border_qss
+from miku_on_desk.hardware.video import HardwareCaptureError, StillCameraSource
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +113,12 @@ class CameraCaptureWidget(QWidget):
         self,
         parent: QWidget | None = None,
         *,
+        still_source: StillCameraSource | None = None,
         check_permission: Callable[[], Qt.PermissionStatus] | None = None,
         request_permission: Callable[[Callable[[Qt.PermissionStatus], None]], None] | None = None,
     ) -> None:
         super().__init__(parent)
+        self._still_source = still_source
         self._check_permission = check_permission or _default_check_camera_permission
         self._request_permission = request_permission or _default_request_camera_permission
         self._camera: QCamera | None = None
@@ -131,6 +134,10 @@ class CameraCaptureWidget(QWidget):
         layout.addWidget(self._video_widget)
 
     def start(self) -> None:
+        if self._still_source is not None:
+            if not self._still_source.is_available():
+                self.capture_unavailable.emit("未检测到可用的 CSI 摄像头")
+            return
         camera_available, _ = probe_capture_availability()
         if not camera_available:
             self.capture_unavailable.emit("未检测到可用的摄像头")
@@ -173,6 +180,13 @@ class CameraCaptureWidget(QWidget):
             self.capture_unavailable.emit("启动摄像头失败")
 
     def capture_photo(self) -> None:
+        if self._still_source is not None:
+            try:
+                self.photo_captured.emit(self._still_source.capture_png())
+            except HardwareCaptureError as exc:
+                logger.warning("CSI 拍照失败：%s", exc)
+                self.capture_unavailable.emit(str(exc))
+            return
         if self._image_capture is None:
             self.capture_unavailable.emit("摄像头未就绪")
             return

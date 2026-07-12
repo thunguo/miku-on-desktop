@@ -96,3 +96,18 @@ def test_apply_settings_form_ignores_unrelated_fields() -> None:
     updated = apply_settings_form(settings, fields)
 
     assert updated.skills_dir is None
+
+
+def test_apply_settings_form_updates_hardware_visual_toggles() -> None:
+    settings = AppSettings()
+
+    updated = apply_settings_form(
+        settings,
+        {
+            "hardware_hdmi_enabled": ["0", "1"],
+            "presence_camera_enabled": ["0", "1"],
+        },
+    )
+
+    assert updated.hardware.hdmi.enabled is True
+    assert updated.hardware.presence_camera.enabled is True

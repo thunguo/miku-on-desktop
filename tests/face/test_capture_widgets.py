@@ -22,6 +22,21 @@ from miku_on_desk.face.ui.capture_widgets import (
 )
 
 
+class _FakeStillSource:
+    def __init__(self, *, available: bool = True, data: bytes = b"png") -> None:
+        self.available = available
+        self.data = data
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def capture_png(self) -> bytes:
+        return self.data
+
+    def capture(self) -> object:
+        raise NotImplementedError
+
+
 def test_probe_capture_availability_reports_both_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -143,6 +158,31 @@ def test_camera_capture_widget_capture_photo_emits_unavailable_without_session(
     widget.capture_photo()
 
     assert len(messages) == 1
+
+
+def test_camera_capture_widget_uses_explicit_still_source_without_qt_camera(
+    qapp: QApplication,
+) -> None:
+    widget = CameraCaptureWidget(still_source=_FakeStillSource(data=b"camera-png"))
+    captured: list[bytes] = []
+    widget.photo_captured.connect(captured.append)
+
+    widget.start()
+    widget.capture_photo()
+
+    assert captured == [b"camera-png"]
+
+
+def test_camera_capture_widget_reports_unavailable_explicit_still_source(
+    qapp: QApplication,
+) -> None:
+    widget = CameraCaptureWidget(still_source=_FakeStillSource(available=False))
+    messages: list[str] = []
+    widget.capture_unavailable.connect(messages.append)
+
+    widget.start()
+
+    assert messages == ["未检测到可用的 CSI 摄像头"]
 
 
 def test_audio_recorder_widget_start_emits_unavailable_when_no_microphone_device(

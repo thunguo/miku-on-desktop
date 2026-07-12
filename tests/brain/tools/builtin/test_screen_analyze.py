@@ -34,6 +34,7 @@ from miku_on_desk.brain.tools.read_tracker import ReadTracker
 from miku_on_desk.brain.tools.registry import ToolRegistry
 from miku_on_desk.config.settings import ModelRouterConfig, ModelTier, ProviderConfig, ProviderName
 from miku_on_desk.hands_eyes.backend import ForegroundAppInfo, PlatformBackend, UIElement
+from miku_on_desk.hardware.video import FrameSource
 
 _FAKE_SCREEN_SIZE = (1200, 800)
 
@@ -111,6 +112,16 @@ class _RaisingProvider(Provider):
     ) -> StreamResult:
         self.calls.append({"model": model})
         raise RuntimeError("网络连接失败")
+
+
+class _FakeFrameSource(FrameSource):
+    def __init__(self, image: Image.Image) -> None:
+        self.image = image
+        self.calls = 0
+
+    def capture(self) -> Image.Image:
+        self.calls += 1
+        return self.image
 
 
 def _make_registry(tmp_path: Path) -> ToolRegistry:
@@ -359,6 +370,36 @@ async def test_query_no_match_with_qwen_provider_uses_single_call_native_point_g
         "found": True,
         "x": 600,
         "y": 200,
+        "confidence": "native_point",
+    }
+
+
+async def test_hardware_frame_source_uses_hdmi_coordinate_origin(tmp_path: Path) -> None:
+    backend = _FakeBackend()
+    provider = _FakeProvider(
+        StreamResult(success=True, content=json.dumps({"found": True, "point_2d": [500, 250]}))
+    )
+    source = _FakeFrameSource(Image.new("RGB", (800, 400)))
+    registry = _make_registry(tmp_path)
+    register_screen_analyze_tool(
+        backend=backend,
+        router=_qwen_router(),
+        providers={ProviderName.QWEN: provider},
+        registry=registry,
+        screen_source=source,
+    )
+
+    result = await registry.execute(
+        ToolUseBlock(id="c1", name="screen_analyze", input={"query": "确定按钮"}),
+        session_id="s1",
+    )
+
+    assert result.is_error is False
+    assert source.calls == 1
+    assert json.loads(result.content)["vision_grounding"] == {
+        "found": True,
+        "x": 400,
+        "y": 100,
         "confidence": "native_point",
     }
 

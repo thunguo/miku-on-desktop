@@ -74,6 +74,7 @@ from miku_on_desk.face.ui.theme import (
     qcolor,
 )
 from miku_on_desk.face.voice_clone_worker import VoiceCloneWorker
+from miku_on_desk.hardware.video import StillCameraSource
 
 if TYPE_CHECKING:
     from miku_on_desk.brain.secrets.vault import SecretVault
@@ -176,6 +177,7 @@ class CharacterCloneDialog(QWidget):
         parent: QWidget | None = None,
         *,
         vault: SecretVault | None = None,
+        camera_source: StillCameraSource | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
@@ -184,6 +186,7 @@ class CharacterCloneDialog(QWidget):
         self._assets_pets_dir = assets_pets_dir
         self._settings_path = settings_path
         self._vault = vault
+        self._camera_source = camera_source
         self._settings: AppSettings | None = None
 
         self._generation_config: GenerationConfig | None = None
@@ -352,7 +355,7 @@ class CharacterCloneDialog(QWidget):
         self._photo_error_label.hide()
         layout.addWidget(self._photo_error_label)
 
-        camera_widget = CameraCaptureWidget(page)
+        camera_widget = CameraCaptureWidget(page, still_source=self._camera_source)
         camera_widget.photo_captured.connect(self._on_photo_captured)
         camera_widget.capture_unavailable.connect(self._on_photo_capture_unavailable)
         self._camera_widget = camera_widget

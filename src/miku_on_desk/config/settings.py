@@ -17,6 +17,7 @@ from platformdirs import PlatformDirs
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from miku_on_desk.hardware.device_config import HardwareConfig
 from miku_on_desk.hardware.kiosk_config import KioskConfig
 
 if TYPE_CHECKING:
@@ -406,6 +407,7 @@ class AppSettings(BaseModel):
     voice_cloning: VoiceCloningConfig = Field(default_factory=VoiceCloningConfig)
     voice_input: VoiceInputConfig = Field(default_factory=VoiceInputConfig)
     kiosk: KioskConfig = Field(default_factory=KioskConfig)
+    hardware: HardwareConfig = Field(default_factory=HardwareConfig)
 
     @classmethod
     def load(cls, path: Path) -> AppSettings:
