@@ -902,6 +902,132 @@ def test_walk_enabled_false_never_moves_window(
     window._on_animation_tick()
 
     assert window.x() == origin_x
+
+
+def test_kiosk_disables_walker_even_when_walk_enabled_is_true(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    window = _make_window(tmp_path, walk_enabled=True, kiosk=True)
+
+    assert window._walker is None
+    assert window._target_walker is None
+
+
+def test_kiosk_uses_opaque_background_not_translucent(qapp: QApplication, tmp_path: Path) -> None:
+    window = _make_window(tmp_path, kiosk=True)
+
+    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False
+
+
+def test_kiosk_loads_background_image_when_present(qapp: QApplication, tmp_path: Path) -> None:
+    pet_dir = _make_pet_dir(tmp_path)
+    Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(pet_dir / "kiosk_background.png")
+
+    window = OverlayWindow(pet_dir, kiosk=True)
+
+    assert window._kiosk_background is not None
+    assert not window._kiosk_background.isNull()
+
+
+def test_kiosk_without_background_image_file_has_no_background(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    window = _make_window(tmp_path, kiosk=True)
+
+    assert window._kiosk_background is None
+
+
+def test_non_kiosk_never_loads_background_image_even_if_present(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    pet_dir = _make_pet_dir(tmp_path)
+    Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(pet_dir / "kiosk_background.png")
+
+    window = OverlayWindow(pet_dir, kiosk=False)
+
+    assert window._kiosk_background is None
+
+
+def test_kiosk_does_not_use_tool_window_type(qapp: QApplication, tmp_path: Path) -> None:
+    """Qt::Tool 在实机上被部分窗口管理器忽略 showFullScreen() 请求（窗口停留在构造时
+    的默认尺寸/位置不动）——kiosk 需要一个普通顶层窗口才能真正拿到全屏。
+
+    Qt 的窗口"类型"字段占多个 bit（``WindowType_Mask``），``Tool`` 与 ``Window`` 共享
+    最低位，不能用简单的按位与判断是否命中，必须先按 mask 取出类型字段再比较相等。
+    """
+    window = _make_window(tmp_path, kiosk=True)
+
+    window_type = window.windowFlags() & Qt.WindowType.WindowType_Mask
+    assert window_type != Qt.WindowType.Tool
+
+
+def test_non_kiosk_uses_tool_window_type(qapp: QApplication, tmp_path: Path) -> None:
+    window = _make_window(tmp_path, kiosk=False)
+
+    window_type = window.windowFlags() & Qt.WindowType.WindowType_Mask
+    assert window_type == Qt.WindowType.Tool
+
+
+def test_kiosk_tap_without_drag_opens_chat_popup(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+    window = _make_window(tmp_path, kiosk=True)
+
+    window.mousePressEvent(_mouse_event(QEvent.Type.MouseButtonPress, (10, 10)))
+    window.mouseReleaseEvent(_mouse_event(QEvent.Type.MouseButtonRelease, (10, 10)))
+
+    assert len(created_popups) == 1
+
+
+def test_non_kiosk_tap_without_drag_does_not_open_chat_popup(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created_popups: list[ChatPopup] = []
+    monkeypatch.setattr(ChatPopup, "popup_at", lambda self, global_pos: created_popups.append(self))
+    window = _make_window(tmp_path, kiosk=False)
+
+    window.mousePressEvent(_mouse_event(QEvent.Type.MouseButtonPress, (10, 10)))
+    window.mouseReleaseEvent(_mouse_event(QEvent.Type.MouseButtonRelease, (10, 10)))
+
+    assert created_popups == []
+
+
+def test_non_kiosk_keeps_translucent_background(qapp: QApplication, tmp_path: Path) -> None:
+    window = _make_window(tmp_path, kiosk=False)
+
+    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+
+
+def test_kiosk_shows_settings_button_that_invokes_callback(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    on_settings = Mock()
+    window = _make_window(tmp_path, kiosk=True, on_kiosk_settings_requested=on_settings)
+
+    assert window._kiosk_settings_button is not None
+    window._kiosk_settings_button.click()
+
+    on_settings.assert_called_once()
+
+
+def test_non_kiosk_has_no_settings_button(qapp: QApplication, tmp_path: Path) -> None:
+    window = _make_window(tmp_path)
+
+    assert window._kiosk_settings_button is None
+
+
+def test_kiosk_reflow_bubble_does_not_resize_window(qapp: QApplication, tmp_path: Path) -> None:
+    window = _make_window(tmp_path, kiosk=True)
+    window.resize(320, 480)
+    size_before = window.size()
+
+    window._bubble.show_speech("你好" * 50)
+    window._reflow_bubble()
+
+    assert window.size() == size_before
+
     assert window._walker is None
 
 

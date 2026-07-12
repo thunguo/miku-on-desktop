@@ -72,6 +72,30 @@ uv run miku-on-desk
 启动后会在系统托盘出现图标,桌面上出现悬浮宠物窗口。右键点击托盘图标或宠物本体可以打开
 设置面板、记忆面板、角色画廊等。
 
+### Raspberry Pi 直接渲染 kiosk
+
+树莓派 MHS-3.5 屏幕可不启动 Linux 桌面，直接把 kiosk 渲染到 `/dev/fb0`。部署前先在
+树莓派完成依赖安装，并确认 `miku-on-desk-kiosk` 能在桌面会话中正常启动：
+
+```bash
+cd /home/thunguo/miku-on-desk
+uv sync
+sudo ./scripts/install-kiosk-direct-render.sh
+```
+
+脚本会停止并禁用 LightDM/X11，安装 `miku-kiosk.service`，然后以 Qt LinuxFB 插件直接渲染
+到屏幕。启动或运行异常不会回到 Linux 桌面：已初始化 Qt 时会显示 Miku 的错误页，详细日志在：
+
+```bash
+journalctl -u miku-kiosk.service -f
+```
+
+通过 SSH 恢复原桌面：
+
+```bash
+sudo /home/thunguo/miku-on-desk/scripts/restore-desktop.sh
+```
+
 ## 开发
 
 ```bash

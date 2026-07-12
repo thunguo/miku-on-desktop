@@ -9,12 +9,15 @@ from typing import Any
 
 import pytest
 
+from miku_on_desk.brain.tools.registry import ToolExecutionError
 from miku_on_desk.hands_eyes import backend as backend_module
 from miku_on_desk.hands_eyes.backend import (
     ForegroundAppInfo,
     MacOSBackend,
+    NullBackend,
     UIElement,
     WindowsBackend,
+    create_platform_backend,
 )
 
 
@@ -82,3 +85,26 @@ def test_windows_backend_open_app_invokes_cmd_start(monkeypatch: pytest.MonkeyPa
     WindowsBackend().open_app("notepad")
 
     assert calls == [["cmd", "/c", "start", "", "notepad"]]
+
+
+def test_null_backend_queries_return_empty_results_without_raising() -> None:
+    backend = NullBackend()
+
+    assert backend.list_elements(1) == []
+    assert backend.get_window_bounds(1) is None
+    assert backend.get_idle_seconds() == float("inf")
+    assert backend.get_foreground_app_info() is None
+
+
+def test_null_backend_open_app_raises_tool_execution_error() -> None:
+    with pytest.raises(ToolExecutionError):
+        NullBackend().open_app("计算器")
+
+
+def test_create_platform_backend_falls_back_to_null_backend_on_linux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_module.sys, "platform", "linux")
+
+    assert isinstance(create_platform_backend(), NullBackend)
+

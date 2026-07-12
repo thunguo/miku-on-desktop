@@ -14,11 +14,12 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QContextMenuEvent, QMouseEvent
+from PySide6.QtGui import QContextMenuEvent, QMouseEvent, QPainter, QPaintEvent, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from miku_on_desk.brain.providers.base import ToolUseBlock
@@ -70,6 +71,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _BUBBLE_MARGIN = 10
+# kiosk 模式下角色目录里若存在这张图，铺满整个窗口当背景；桌面版悬浮窗从不读这个文件——
+# 半透明贴桌面的场景没有"背景"的概念，只有 kiosk 全屏画布才需要。
+_KIOSK_BACKGROUND_FILENAME = "kiosk_background.png"
 # 状态/帧推进定时器：30fps 对离散精灵帧切换来说绰绰有余，不需要跟随显示器刷新率。
 _ANIMATION_TICK_MS = 33
 # 流式增量（ContentDelta/AcpChunkReceived）到达频率可能远超人眼可感知的重排速度，
@@ -91,6 +95,9 @@ _REACTION_STATE_MAP: dict[ReactionKind, PetState] = {
 
 _STOP_BUTTON_SIZE = 22
 _STOP_BUTTON_MARGIN = 6
+# kiosk 设置按钮比桌面版的停止按钮大一圈——touch 目标本来就该比鼠标点击目标大，
+# 而且这是触屏用户能摸到的常驻入口，不像停止按钮只在任务进行中才短暂出现。
+_KIOSK_SETTINGS_BUTTON_SIZE = 40
 _STOP_BUTTON_STYLE = f"""
 QPushButton {{
     background-color: {PINK_ACCENT};
@@ -135,6 +142,14 @@ class OverlayWindow(QWidget):
     ``PetStateMachine``，谁先到就先生效，互不冲突（transient 后来者覆盖、baseline 只在真正
     变化时重置计时）；``cancellation_gate`` 单独驱动任务进行中显示的停止按钮。``growth_store``
     同样可选：不传时仍会展示单次会话的战报小结，只是不追加/持久化跨会话的心情曲线。
+
+    ``kiosk`` 控制树莓派硬件端的渲染路径，由构造方（``kiosk_main.py``）显式传入，本类
+    不读任何配置文件；桌面入口 ``main.py`` 不传或传 ``False``，行为完全不变。为 ``True``
+    时：背景不透明（不再是贴桌面用的半透明悬浮窗风格）、禁用 ``PetWalker`` 游走（游走靠
+    ``self.move()`` 改变窗口绝对位置，与"贴在桌面任意位置"强绑定，全屏 kiosk 下没有意义）、
+    右上角多一个设置图标按钮、气泡/精灵的摆放改为在固定画布内重新布局而不是靠改变窗口
+    大小去贴合内容。是否要真正 ``showFullScreen()`` 由调用方决定，跟 ``main.py`` 显式调用
+    ``window.show()`` 是同样的分工。
     """
 
     def __init__(
@@ -145,6 +160,7 @@ class OverlayWindow(QWidget):
         scale: float = 1.0,
         always_on_top: bool = True,
         walk_enabled: bool = True,
+        kiosk: bool = False,
         event_bus: BrainEventBus | None = None,
         confirmation_gate: ConfirmationGate | None = None,
         cancellation_gate: CancellationGate | None = None,
@@ -154,6 +170,7 @@ class OverlayWindow(QWidget):
         voice_capture: PcmAudioCapture | None = None,
         stt_worker: SttWorker | None = None,
         growth_store: GrowthStore | None = None,
+        on_kiosk_settings_requested: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         meta = SpriteSheetMeta.load(pet_dir / "pet.json")
@@ -161,20 +178,37 @@ class OverlayWindow(QWidget):
         self._meta = meta
         self._actions = actions
         self._scale = scale
+        self._kiosk = kiosk
+        self._kiosk_background: QPixmap | None = None
+        if kiosk:
+            background_path = pet_dir / _KIOSK_BACKGROUND_FILENAME
+            if background_path.is_file():
+                self._kiosk_background = QPixmap(str(background_path))
 
-        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        flags = Qt.WindowType.FramelessWindowHint
+        if kiosk:
+            # Qt::Tool 是给桌面版"贴桌面悬浮窗、不进任务栏/不参与正常窗口管理"设计的；
+            # 在真机上实测发现不少窗口管理器不会把 Qt::Tool 窗口真正拉到全屏
+            # （showFullScreen() 被静默忽略，窗口仍停在构造时的默认尺寸/位置）——kiosk
+            # 需要的是一个普通的全屏顶层窗口，不需要"工具窗"这层语义。
+            flags |= Qt.WindowType.Window
+        else:
+            flags |= Qt.WindowType.Tool
         if always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
-        if sys.platform == "darwin":
+        if sys.platform == "darwin" and not kiosk:
             # macOS 上 Qt::Tool 会映射到 NSPanel 的浮动/工具窗样式，默认在宿主 App
             # 失去焦点时自动隐藏——这个属性是 Qt 官方提供的对应解法，让窗口在失焦后
             # 仍然常驻显示。Windows 的 Qt::Tool 没有这种失焦自动隐藏行为，不需要处理。
             self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        if not kiosk:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self._walker: PetWalker | None = PetWalker() if walk_enabled else None
-        self._target_walker: PetTargetWalker | None = PetTargetWalker() if walk_enabled else None
+        self._walker: PetWalker | None = PetWalker() if walk_enabled and not kiosk else None
+        self._target_walker: PetTargetWalker | None = (
+            PetTargetWalker() if walk_enabled and not kiosk else None
+        )
         self._pending_click_target: tuple[int, int] | None = None
         self._pending_click_tool_use_id: str | None = None
 
@@ -190,12 +224,23 @@ class OverlayWindow(QWidget):
         self._stop_button.clicked.connect(self._on_stop_clicked)
         self._stop_button.hide()
 
+        self._kiosk_settings_button: QPushButton | None = None
+        if kiosk:
+            self._kiosk_settings_button = QPushButton("⚙", self)
+            self._kiosk_settings_button.setFixedSize(
+                _KIOSK_SETTINGS_BUTTON_SIZE, _KIOSK_SETTINGS_BUTTON_SIZE
+            )
+            self._kiosk_settings_button.setStyleSheet(_STOP_BUTTON_STYLE)
+            if on_kiosk_settings_requested is not None:
+                self._kiosk_settings_button.clicked.connect(on_kiosk_settings_requested)
+
         self._progress_label = QLabel(self)
         self._progress_label.setStyleSheet(_PROGRESS_LABEL_STYLE)
         self._progress_label.hide()
 
         self._reflow_bubble()
         self._position_stop_button()
+        self._position_kiosk_settings_button()
         self.move(x, y)
 
         self._state_machine = PetStateMachine()
@@ -241,10 +286,16 @@ class OverlayWindow(QWidget):
         self._bubble.setGeometry(_BUBBLE_MARGIN, _BUBBLE_MARGIN, width, height)
 
     def _reflow_bubble(self) -> None:
-        """在气泡文字/确认态变化后调用：按新内容重新计算气泡高度，连带调整宿主窗口的
-        总高度与位置，使精灵底部在屏幕上的绝对位置保持不变——气泡只在精灵头顶向上
-        长大/缩小，不会因为窗口跟着变高而把精灵一起往下推。
+        """在气泡文字/确认态变化后调用：按新内容重新计算气泡高度。
+
+        桌面模式下连带调整宿主窗口的总高度与位置，使精灵底部在屏幕上的绝对位置保持
+        不变——气泡只在精灵头顶向上长大/缩小，不会因为窗口跟着变高而把精灵一起往下推。
+        kiosk 模式下窗口本身是铺满屏幕的固定画布，不能靠改窗口大小贴合内容，改为在这个
+        固定画布内重新摆放气泡（占屏幕顶部一段）与精灵（贴底部居中）的位置。
         """
+        if self._kiosk:
+            self._reflow_bubble_kiosk()
+            return
         width = max(self._sprite_widget.width() - 2 * _BUBBLE_MARGIN, 0)
         bubble_height = self._bubble.ideal_height(width)
         reserved = bubble_height + _BUBBLE_MARGIN
@@ -255,6 +306,14 @@ class OverlayWindow(QWidget):
         )
         self._sprite_widget.move(0, reserved)
         self._position_bubble()
+
+    def _reflow_bubble_kiosk(self) -> None:
+        width = max(self.width() - 2 * _BUBBLE_MARGIN, 0)
+        bubble_height = self._bubble.ideal_height(width)
+        self._bubble.setGeometry(_BUBBLE_MARGIN, _BUBBLE_MARGIN, width, bubble_height)
+        sprite_x = (self.width() - self._sprite_widget.width()) // 2
+        sprite_y = self.height() - self._sprite_widget.height()
+        self._sprite_widget.move(max(sprite_x, 0), max(sprite_y, 0))
 
     def _schedule_reflow(self) -> None:
         """流式增量高频到达时的节流入口：文字已经在调用方立即追加进气泡，这里只把
@@ -483,6 +542,9 @@ class OverlayWindow(QWidget):
         self._progress_label.adjustSize()
         x = self.width() - self._progress_label.width() - _PROGRESS_LABEL_MARGIN
         y = _STOP_BUTTON_MARGIN + _STOP_BUTTON_SIZE + _PROGRESS_LABEL_MARGIN
+        if self._kiosk:
+            # 停止按钮在 kiosk 模式下被设置按钮挤到下面一层，进度标签要跟着往下让位。
+            y += _KIOSK_SETTINGS_BUTTON_SIZE + _STOP_BUTTON_MARGIN
         self._progress_label.move(max(x, 0), y)
 
     def _on_hook_event(self, event: HookEvent) -> None:
@@ -525,7 +587,18 @@ class OverlayWindow(QWidget):
 
     def _position_stop_button(self) -> None:
         x = self.width() - _STOP_BUTTON_SIZE - _STOP_BUTTON_MARGIN
-        self._stop_button.move(x, _STOP_BUTTON_MARGIN)
+        y = _STOP_BUTTON_MARGIN
+        if self._kiosk:
+            # kiosk 模式右上角已经固定摆了一个（更大的）设置按钮，停止按钮挪到它下方，
+            # 避免重叠。
+            y += _KIOSK_SETTINGS_BUTTON_SIZE + _STOP_BUTTON_MARGIN
+        self._stop_button.move(x, y)
+
+    def _position_kiosk_settings_button(self) -> None:
+        if self._kiosk_settings_button is None:
+            return
+        x = self.width() - _KIOSK_SETTINGS_BUTTON_SIZE - _STOP_BUTTON_MARGIN
+        self._kiosk_settings_button.move(x, _STOP_BUTTON_MARGIN)
 
 
     def set_pet_dir(self, pet_dir: Path) -> None:
@@ -629,9 +702,22 @@ class OverlayWindow(QWidget):
         else:
             self._actions.talk(text)
 
+    def paintEvent(self, event: QPaintEvent) -> None:
+        if self._kiosk_background is not None:
+            painter = QPainter(self)
+            painter.drawPixmap(self.rect(), self._kiosk_background)
+            painter.end()
+        super().paintEvent(event)
+
     def resizeEvent(self, event: object) -> None:
-        self._position_bubble()
+        if self._kiosk:
+            # kiosk 变体不会像桌面版 `_reflow_bubble` 那样对 self 调用 setGeometry，
+            # 不会递归触发这个 resizeEvent，可以放心整段重新走一次布局（连带精灵位置）。
+            self._reflow_bubble_kiosk()
+        else:
+            self._position_bubble()
         self._position_stop_button()
+        self._position_kiosk_settings_button()
         self._position_progress_label()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -660,6 +746,10 @@ class OverlayWindow(QWidget):
             self._state_machine.set_dragging(False, t=self._elapsed())
         else:
             self._state_machine.trigger_transient(PetState.CLICKED, t=self._elapsed())
+            if self._kiosk:
+                # 触屏没有右键菜单可用，点一下精灵本体是 kiosk 模式下唯一直觉的
+                # "跟 Miku 说话"触达方式，等价于桌面版的全局热键 open_chat。
+                self._show_chat_popup(self.pos())
         self._drag_origin = None
         self._press_pos = None
         self._dragged = False

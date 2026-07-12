@@ -7,6 +7,13 @@ pynput 的 HotKey DSL（``"<ctrl>+<shift>+y"``）跟 Qt 的 QKeySequence Portabl
 emit，Qt 的 AutoConnection 会自动把连接的槽调度到接收者所在线程（构造
 ``GlobalHotKeyManager`` 时所在的 UI 主线程）——跟 speech_controller.py 里 ``_SynthWorker``
 向 UI 线程回传音频 chunk 是同一个模式，不需要手写锁/队列。
+
+pynput 在 Linux 上仅仅 ``from pynput.keyboard import ...`` 就会立刻尝试连接 X11，连不上
+就直接抛异常整体导入失败——不需要等到真正启动监听才失败。这会波及所有 import 这个模块的
+调用方（``main.py``/``kiosk_main.py`` → ``cli.py``），导致纯文本 CLI 测试入口在没有
+DISPLAY 的 SSH 会话里连 import 都做不到。因此这里用 try/except 包一层：导入失败时把两个
+名字设为 ``None``，``rebind()`` 检测到后直接降级跳过（走跟"监听启动失败"完全一样的日志+
+不崩溃路径），而不是让整个模块在 import 阶段就崩掉。
 """
 
 from __future__ import annotations
@@ -15,8 +22,13 @@ import functools
 import logging
 from collections.abc import Callable
 
-from pynput.keyboard import GlobalHotKeys, HotKey
 from PySide6.QtCore import QObject, Signal
+
+try:
+    from pynput.keyboard import GlobalHotKeys, HotKey
+except Exception:
+    GlobalHotKeys = None
+    HotKey = None
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +102,10 @@ class GlobalHotKeyManager(QObject):
         """停掉旧监听线程（若有），用新绑定表建一个新的 GlobalHotKeys 并启动。"""
         self._stop_listener()
 
+        if GlobalHotKeys is None or HotKey is None:
+            logger.warning("pynput 未能在本机初始化（大概率没有可用的 DISPLAY），已禁用全局热键")
+            return
+
         pynput_hotkeys: dict[str, Callable[[], None]] = {}
         action_by_combo: dict[str, str] = {}
         for action, qt_sequence in bindings.items():
@@ -111,8 +127,15 @@ class GlobalHotKeyManager(QObject):
 
         if not pynput_hotkeys:
             return
-        self._listener = GlobalHotKeys(pynput_hotkeys)
-        self._listener.start()
+        try:
+            listener = GlobalHotKeys(pynput_hotkeys)
+            listener.start()
+        except Exception:
+            # 触屏一体机大概率没有接物理键盘，这条路径本来就更容易在边缘环境失败——
+            # 全局热键是锦上添花的快捷方式，不是核心功能，失败只记日志降级，不能拖垮整个应用。
+            logger.exception("全局热键监听启动失败，已禁用全局热键")
+            return
+        self._listener = listener
 
     def _emit(self, action: str) -> None:
         self.hotkey_triggered.emit(action)
