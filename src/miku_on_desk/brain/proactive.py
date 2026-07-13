@@ -173,6 +173,9 @@ async def run_camera_presence_scheduler(
     chat_input: queue.Queue[object],
 ) -> None:
     """本地运动门控后的限频在场问候，不保存摄像头帧。"""
+    if not camera.is_available():
+        logger.warning("摄像头在场观察已启用，但未检测到可用的 CSI 摄像头")
+        return
     detector = MotionDetector()
     person_present = False
     last_trigger_at: datetime | None = None
