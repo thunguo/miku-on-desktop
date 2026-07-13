@@ -56,6 +56,7 @@ from miku_on_desk.brain.proactive import (
     ProactiveToggleRequest,
     ProactiveTrigger,
     apply_proactive_toggle,
+    run_camera_presence_scheduler,
     run_proactive_scheduler,
 )
 from miku_on_desk.brain.prompt.frozen_system import FrozenSystemSections, build_frozen_system
@@ -130,6 +131,7 @@ from miku_on_desk.face.ui.theme import apply_fluent_theme
 from miku_on_desk.face.ui.visitor_overlay import VisitorOverlay
 from miku_on_desk.face.ui.voice_change_dialog import VoiceChangeDialog
 from miku_on_desk.hands_eyes.backend import create_platform_backend
+from miku_on_desk.hardware.video import build_csi_camera_source, build_hdmi_source
 
 logger = logging.getLogger(__name__)
 
@@ -324,13 +326,16 @@ async def _brain_main(
     await asyncio.to_thread(memory_system.base.start_session, session_id, "桌面对话")
     register_memory_tools(memory_system, registry)
 
-    backend = create_platform_backend()
+    backend = create_platform_backend(settings.hardware)
+    screen_source = build_hdmi_source(settings.hardware.hdmi)
+    csi_camera_source = build_csi_camera_source(settings.hardware.csi_camera)
     register_computer_input_tool(backend, registry, computer_use=settings.computer_use)
     register_screen_analyze_tool(
         backend=backend,
         router=router,
         providers=providers,
         registry=registry,
+        screen_source=screen_source,
         match_threshold=settings.memory_tuning.screen_match_threshold,
     )
 
@@ -407,6 +412,18 @@ async def _brain_main(
                 router=router,
                 providers=providers,
                 backend=backend,
+                chat_input=chat_input,
+            )
+        )
+    camera_presence_task: asyncio.Task[None] | None = None
+    if settings.hardware.presence_camera.enabled and csi_camera_source is not None:
+        camera_presence_task = asyncio.create_task(
+            run_camera_presence_scheduler(
+                presence_config=settings.hardware.presence_camera,
+                proactive_config=settings.proactive,
+                camera=csi_camera_source,
+                router=router,
+                providers=providers,
                 chat_input=chat_input,
             )
         )
@@ -514,6 +531,10 @@ async def _brain_main(
 
             event_bus.emit_event(LoopFinished(result))
     finally:
+        if camera_presence_task is not None:
+            camera_presence_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await camera_presence_task
         if proactive_task is not None:
             proactive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

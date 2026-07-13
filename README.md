@@ -96,6 +96,17 @@ journalctl -u miku-kiosk.service -f
 sudo /home/thunguo/miku-on-desk/scripts/restore-desktop.sh
 ```
 
+### 树莓派 HDMI 与 CSI 摄像头
+
+树莓派硬件视觉默认关闭。通过局域网设置页显式开启“HDMI 采集卡屏幕分析”或“摄像头在场观察”后，
+kiosk 重启会加载新设置；HDMI 采集会使用
+`/dev/v4l/by-id/usb-MACROSILICON_USB_Video-video-index0`，避免 CSI 摄像头接入后 `/dev/videoN`
+编号变化。Pico HID 未接入或未确认时，外部主机控制会安全拒绝，不会发送不完整指令。
+
+CSI `imx219` 用于 kiosk 本机的角色克隆拍照；它由 `rpicam-still` 采集，避免 Qt 默认选中 HDMI
+采集卡。摄像头在场观察也默认关闭；启用后会先本地检测画面变化，再限频发送单张快照确认是否有人，
+不会落盘画面或识别身份。
+
 ## 开发
 
 ```bash

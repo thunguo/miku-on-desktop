@@ -14,20 +14,26 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import queue
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
 
-from miku_on_desk.brain.model_router import ModelRouter
+from PIL import Image
+
+from miku_on_desk.brain.model_router import ModelRouter, NoModelAvailableError
 from miku_on_desk.brain.providers.base import ImageBlock, Message, Provider, TextBlock
 from miku_on_desk.config.settings import ModelTier, ProactiveConfig, ProviderName
 from miku_on_desk.hands_eyes.backend import PlatformBackend
 from miku_on_desk.hands_eyes.capture import capture_screen
 from miku_on_desk.hands_eyes.vision_fallback import encode_image_as_base64
+from miku_on_desk.hardware.device_config import PresenceCameraConfig
+from miku_on_desk.hardware.video import HardwareCaptureError, MotionDetector, StillCameraSource
 
 _PEEK_TIER = ModelTier.FAST
+logger = logging.getLogger(__name__)
 
 _PEEK_SYSTEM_PROMPT = (
     "你是 Miku 的观察器：给你一张当前屏幕截图和前台应用信息，判断现在是否有一个自然、"
@@ -36,6 +42,13 @@ _PEEK_SYSTEM_PROMPT = (
     '严格输出 JSON：{"should_speak": true 或 false, "observation": "你注意到的'
     '具体内容，简短一句话"}，不要输出其他文字。should_speak 为 false 时'
     "observation 可以是空字符串。"
+)
+
+_PRESENCE_SYSTEM_PROMPT = (
+    "你是隐私优先的在场确认器。给你一张由本地运动检测触发的单帧摄像头快照，只判断是否能"
+    "清楚看到一个人。不要识别身份、年龄、性别、情绪或任何个人特征。"
+    '严格输出 JSON：{"person_present": true 或 false, "observation": "简短的非身份化观察"}。'
+    "只有 person_present 为 true 时才填写 observation。"
 )
 
 
@@ -119,6 +132,92 @@ async def _peek_and_decide(
     if decision is None or not decision.get("should_speak") or not decision.get("observation"):
         return None
     return ProactiveTrigger(observation=decision["observation"])
+
+
+async def _confirm_person_present(
+    *,
+    image: Image.Image,
+    router: ModelRouter,
+    providers: dict[ProviderName, Provider],
+) -> str | None:
+    """返回非身份化观察；模型不可用或无法确认时一律不触发。"""
+    try:
+        resolved = router.resolve_provider(ProviderName.QWEN, _PEEK_TIER)
+    except NoModelAvailableError:
+        logger.warning("摄像头在场确认不可用：未配置 Qwen 视觉模型")
+        return None
+    provider = providers.get(resolved.provider)
+    if provider is None:
+        return None
+    media_type, data = encode_image_as_base64(image)
+    result = await provider.stream(
+        model=resolved.model_id,
+        system=_PRESENCE_SYSTEM_PROMPT,
+        messages=[Message(role="user", content=[ImageBlock(media_type=media_type, data=data)])],
+        tools=[],
+    )
+    decision = _parse_peek_decision(result.content) if result.success and result.content else None
+    if decision is None or decision.get("person_present") is not True:
+        return None
+    observation = decision.get("observation")
+    return str(observation).strip() if observation else "Miku 看到有人回来了。"
+
+
+async def run_camera_presence_scheduler(
+    *,
+    presence_config: PresenceCameraConfig,
+    proactive_config: ProactiveConfig,
+    camera: StillCameraSource,
+    router: ModelRouter,
+    providers: dict[ProviderName, Provider],
+    chat_input: queue.Queue[object],
+) -> None:
+    """本地运动门控后的限频在场问候，不保存摄像头帧。"""
+    if not camera.is_available():
+        logger.warning("摄像头在场观察已启用，但未检测到可用的 CSI 摄像头")
+        return
+    detector = MotionDetector()
+    person_present = False
+    last_trigger_at: datetime | None = None
+    daily_count = 0
+    day_marker = date.today()
+
+    while True:
+        await asyncio.sleep(presence_config.scan_interval_s)
+        now = datetime.now()
+        if now.date() != day_marker:
+            daily_count, day_marker = 0, now.date()
+        if (
+            daily_count >= proactive_config.max_daily_triggers
+            or _is_quiet_now(proactive_config, now)
+        ):
+            continue
+        try:
+            image = await asyncio.to_thread(camera.capture)
+        except HardwareCaptureError as exc:
+            logger.warning("摄像头在场采集失败：%s", exc)
+            continue
+        if not detector.changed(image, threshold=presence_config.motion_threshold):
+            continue
+
+        observation = await _confirm_person_present(
+            image=image, router=router, providers=providers
+        )
+        if observation is None:
+            person_present = False
+            continue
+        if person_present:
+            continue
+        person_present = True
+        if (
+            last_trigger_at is not None
+            and (now - last_trigger_at).total_seconds()
+            < presence_config.min_trigger_interval_s
+        ):
+            continue
+        chat_input.put(ProactiveTrigger(observation=observation))
+        last_trigger_at = now
+        daily_count += 1
 
 
 async def _run_one_iteration(

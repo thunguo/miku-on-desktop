@@ -41,6 +41,7 @@ from miku_on_desk.face.ui.rotated_container import RotatedContainer
 from miku_on_desk.face.ui.settings_panel import SettingsPanel
 from miku_on_desk.face.ui.speech_controller import SpeechController
 from miku_on_desk.face.ui.theme import apply_fluent_theme
+from miku_on_desk.hardware.video import StillCameraSource, build_csi_camera_source
 from miku_on_desk.main import (
     _SHUTDOWN,
     PetActions,
@@ -115,12 +116,15 @@ def _open_kiosk_clone_dialog(
     vault: SecretVault,
     speech_controller: SpeechController | None,
     relationship_store: RelationshipStore,
+    camera_source: StillCameraSource | None,
 ) -> CharacterCloneDialog:
     """跟 ``main.py::_open_character_clone_dialog`` 同样的接线，但不依赖
     ``CharacterGalleryPanel``——kiosk 用的是 ``KioskSettingsPanel``，克隆完成后不刷新
     面板的角色按钮列表（下次重新打开面板会读到最新角色），只负责真正切换到新角色。
     """
-    dialog = CharacterCloneDialog(_assets_pets_dir(), settings_path, vault=vault)
+    dialog = CharacterCloneDialog(
+        _assets_pets_dir(), settings_path, vault=vault, camera_source=camera_source
+    )
     dialog.character_created.connect(
         lambda pet_dir: _on_character_switched(
             pet_dir,
@@ -142,6 +146,7 @@ def _run_kiosk() -> None:
     settings_path = config.settings_path
     vault = config.vault
     settings = config.settings
+    camera_source = build_csi_camera_source(settings.hardware.csi_camera)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -241,6 +246,7 @@ def _run_kiosk() -> None:
                 vault=vault,
                 speech_controller=speech_controller,
                 relationship_store=relationship_store,
+                camera_source=camera_source,
             )
         )
         panel.quit_requested.connect(_on_quit)

@@ -30,6 +30,7 @@ from miku_on_desk.config.settings import (
     load_settings_with_vault,
     save_settings_with_vault,
 )
+from miku_on_desk.hardware.device_config import HardwareConfig
 from miku_on_desk.hardware.kiosk_config import KioskConfig
 
 
@@ -208,6 +209,14 @@ def test_proactive_config_defaults_to_enabled() -> None:
     assert proactive.quiet_hours_start is None
     assert proactive.quiet_hours_end is None
     assert proactive.max_daily_triggers == 10
+
+
+def test_hardware_config_defaults_to_disabled_external_observation() -> None:
+    config = HardwareConfig()
+
+    assert config.hdmi.enabled is False
+    assert config.presence_camera.enabled is False
+    assert config.csi_camera.enabled is True
 
 
 def test_app_settings_proactive_roundtrip_through_save_and_load(tmp_path: Path) -> None:

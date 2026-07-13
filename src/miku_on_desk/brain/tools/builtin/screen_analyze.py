@@ -46,6 +46,7 @@ from miku_on_desk.config.settings import ModelTier, ProviderName
 from miku_on_desk.hands_eyes.backend import PlatformBackend, element_to_dict
 from miku_on_desk.hands_eyes.capture import capture_origin, capture_screen, crop_to_bounds
 from miku_on_desk.hands_eyes.vision_fallback import encode_image_as_base64
+from miku_on_desk.hardware.video import FrameSource
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,7 @@ def _make_screen_analyze_handler(
     backend: PlatformBackend,
     router: ModelRouter,
     providers: Mapping[ProviderName, Provider],
+    screen_source: FrameSource | None = None,
     match_threshold: float = _MATCH_THRESHOLD,
 ) -> ToolHandler:
     async def handler(tool_input: dict[str, Any]) -> str:
@@ -188,8 +190,13 @@ def _make_screen_analyze_handler(
             raise ToolExecutionError(f"参数不合法：{exc}") from exc
 
         loop = asyncio.get_running_loop()
-        image = await loop.run_in_executor(None, capture_screen)
-        roi_offset = await loop.run_in_executor(None, capture_origin)
+        if screen_source is None:
+            image = await loop.run_in_executor(None, capture_screen)
+            roi_offset = await loop.run_in_executor(None, capture_origin)
+        else:
+            image = await loop.run_in_executor(None, screen_source.capture)
+            # HDMI 帧的左上角就是 HID 点击的原点；没有本机多显示器坐标系可换算。
+            roi_offset = (0, 0)
 
         if parsed.pid is not None:
             bounds = await loop.run_in_executor(None, backend.get_window_bounds, parsed.pid)
@@ -247,6 +254,7 @@ def register_screen_analyze_tool(
     router: ModelRouter,
     providers: Mapping[ProviderName, Provider],
     registry: ToolRegistry,
+    screen_source: FrameSource | None = None,
     match_threshold: float = _MATCH_THRESHOLD,
 ) -> None:
     registry.register(
@@ -283,7 +291,11 @@ def register_screen_analyze_tool(
                 },
             ),
             handler=_make_screen_analyze_handler(
-                backend=backend, router=router, providers=providers, match_threshold=match_threshold
+                backend=backend,
+                router=router,
+                providers=providers,
+                screen_source=screen_source,
+                match_threshold=match_threshold,
             ),
         )
     )

@@ -45,6 +45,7 @@ input[type=text], input[type=password], textarea {{ width: 100%; box-sizing: bor
 <form method="POST">
 {provider_fieldsets}
 {persona_fieldset}
+{hardware_fieldset}
 <button type="submit">保存</button>
 </form>
 </body>
@@ -99,6 +100,21 @@ def _render_persona_fieldset(persona: PersonaConfig) -> str:
 </fieldset>"""
 
 
+def _render_hardware_fieldset(settings: AppSettings) -> str:
+    hdmi_checked = " checked" if settings.hardware.hdmi.enabled else ""
+    presence_checked = " checked" if settings.hardware.presence_camera.enabled else ""
+    return f"""<fieldset>
+<legend>树莓派硬件视觉</legend>
+<input type="hidden" name="hardware_hdmi_enabled" value="0">
+<label><input type="checkbox" name="hardware_hdmi_enabled" value="1"{hdmi_checked}>
+启用 HDMI 采集卡屏幕分析</label>
+<input type="hidden" name="presence_camera_enabled" value="0">
+<label><input type="checkbox" name="presence_camera_enabled" value="1"{presence_checked}>
+启用摄像头在场观察</label>
+<p>摄像头只在本地检测到画面变化后发送单张快照确认是否有人；不会保存画面或识别身份。</p>
+</fieldset>"""
+
+
 def render_settings_page(settings: AppSettings, *, saved: bool = False) -> str:
     provider_fieldsets = "\n".join(
         _render_provider_fieldset(name, getattr(settings.model_router, name))
@@ -108,6 +124,7 @@ def render_settings_page(settings: AppSettings, *, saved: bool = False) -> str:
         banner=_SAVED_BANNER if saved else "",
         provider_fieldsets=provider_fieldsets,
         persona_fieldset=_render_persona_fieldset(settings.persona),
+        hardware_fieldset=_render_hardware_fieldset(settings),
     )
 
 
@@ -149,5 +166,12 @@ def apply_settings_form(settings: AppSettings, fields: dict[str, list[str]]) -> 
     persona_personality = _first("persona_personality")
     if persona_personality is not None and persona_personality.strip():
         updated.persona.personality = persona_personality.strip()
+
+    hdmi_values = fields.get("hardware_hdmi_enabled")
+    if hdmi_values is not None:
+        updated.hardware.hdmi.enabled = "1" in hdmi_values
+    presence_values = fields.get("presence_camera_enabled")
+    if presence_values is not None:
+        updated.hardware.presence_camera.enabled = "1" in presence_values
 
     return updated

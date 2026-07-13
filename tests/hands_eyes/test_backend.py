@@ -12,6 +12,7 @@ import pytest
 from miku_on_desk.brain.tools.registry import ToolExecutionError
 from miku_on_desk.hands_eyes import backend as backend_module
 from miku_on_desk.hands_eyes.backend import (
+    CaptureCardBackend,
     ForegroundAppInfo,
     MacOSBackend,
     NullBackend,
@@ -19,6 +20,7 @@ from miku_on_desk.hands_eyes.backend import (
     WindowsBackend,
     create_platform_backend,
 )
+from miku_on_desk.hardware.device_config import HardwareConfig
 
 
 class _ConcreteBackend(backend_module.PlatformBackend):
@@ -108,3 +110,21 @@ def test_create_platform_backend_falls_back_to_null_backend_on_linux(
 
     assert isinstance(create_platform_backend(), NullBackend)
 
+
+def test_create_platform_backend_uses_capture_card_backend_when_hdmi_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_module.sys, "platform", "linux")
+    hardware = HardwareConfig()
+    hardware.hdmi.enabled = True
+
+    assert isinstance(create_platform_backend(hardware), CaptureCardBackend)
+
+
+def test_capture_card_backend_rejects_input_without_enabled_pico() -> None:
+    hardware = HardwareConfig()
+    hardware.hdmi.enabled = True
+    backend = backend_module.CaptureCardBackend(backend_module._hid_transport(hardware))
+
+    with pytest.raises(ToolExecutionError, match="Pico HID 尚未启用"):
+        backend.click(10, 20)

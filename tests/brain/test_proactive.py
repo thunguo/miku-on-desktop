@@ -8,11 +8,13 @@ from datetime import date, datetime, time
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from miku_on_desk.brain.model_router import ModelRouter
 from miku_on_desk.brain.proactive import (
     ProactiveToggleRequest,
     ProactiveTrigger,
+    _confirm_person_present,
     _in_quiet_hours,
     _is_quiet_now,
     _next_interval_s,
@@ -95,6 +97,12 @@ def _make_router() -> ModelRouter:
     return ModelRouter(config)
 
 
+def _qwen_router() -> ModelRouter:
+    config = ModelRouterConfig()
+    config.qwen = ProviderConfig(api_key="sk-qwen", models={ModelTier.FAST: "qwen3-vl-plus"})
+    return ModelRouter(config)
+
+
 def test_parse_hhmm_splits_hour_and_minute() -> None:
     assert _parse_hhmm("22:30") == time(hour=22, minute=30)
 
@@ -151,6 +159,34 @@ async def test_peek_and_decide_returns_trigger_when_should_speak_true() -> None:
     )
 
     assert trigger == ProactiveTrigger(observation="用户在整理发票")
+
+
+async def test_camera_presence_confirms_person_without_identity_inference() -> None:
+    provider = _FakeProvider(
+        StreamResult(
+            success=True,
+            content='{"person_present": true, "observation": "Miku 看到有人回来了。"}',
+        )
+    )
+
+    observation = await _confirm_person_present(
+        image=Image.new("RGB", (8, 8)),
+        router=_qwen_router(),
+        providers={ProviderName.QWEN: provider},
+    )
+
+    assert observation == "Miku 看到有人回来了。"
+    assert len(provider.calls) == 1
+
+
+async def test_camera_presence_does_not_trigger_without_qwen() -> None:
+    observation = await _confirm_person_present(
+        image=Image.new("RGB", (8, 8)),
+        router=_make_router(),
+        providers={},
+    )
+
+    assert observation is None
 
 
 async def test_peek_and_decide_returns_none_when_should_speak_false() -> None:

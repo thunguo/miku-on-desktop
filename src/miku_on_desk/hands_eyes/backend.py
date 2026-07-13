@@ -14,7 +14,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +22,13 @@ import psutil
 
 from miku_on_desk.brain.tools.registry import ToolExecutionError
 from miku_on_desk.hands_eyes import input_injector
+from miku_on_desk.hardware.device_config import HardwareConfig
+from miku_on_desk.hardware.hid import (
+    HidTransport,
+    HidTransportError,
+    SerialHidTransport,
+    UnavailableHidTransport,
+)
 
 
 @dataclass(frozen=True)
@@ -175,7 +182,44 @@ class NullBackend(PlatformBackend):
         return None
 
 
-def create_platform_backend() -> PlatformBackend:
+class CaptureCardBackend(NullBackend):
+    """通过 Pico HID 操作 HDMI 接入的外部主机。
+
+    外部主机没有树莓派可访问的 accessibility tree、进程列表或前台窗口，因此查询类接口
+    保持安全空实现；真正的视觉定位由 HDMI 帧源交给 ``screen_analyze`` 完成。
+    """
+
+    def __init__(self, transport: HidTransport) -> None:
+        self._transport = transport
+
+    def _run(self, callback: Callable[[], None]) -> None:
+        try:
+            callback()
+        except HidTransportError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+
+    def click(self, x: int, y: int) -> None:
+        self._run(lambda: self._transport.click(x, y))
+
+    def type_text(self, text: str) -> None:
+        self._run(lambda: self._transport.type_text(text))
+
+    def press_keys(self, keys: Sequence[str]) -> None:
+        self._run(lambda: self._transport.press_keys(keys))
+
+    def open_app(self, name: str) -> None:
+        raise ToolExecutionError(f"外部 HDMI 主机不支持打开应用：{name}")
+
+
+def _hid_transport(config: HardwareConfig) -> HidTransport:
+    if not config.hid.enabled:
+        return UnavailableHidTransport("Pico HID 尚未启用")
+    if config.hid.serial_device is None:
+        return UnavailableHidTransport("未配置 Pico HID 串口")
+    return SerialHidTransport(config.hid.serial_device, config.hid.timeout_s)
+
+
+def create_platform_backend(hardware: HardwareConfig | None = None) -> PlatformBackend:
     """按当前操作系统选择具体实现。
 
     平台专属依赖（pyobjc/uiautomation）只在对应分支内导入，避免在错误的操作系统上
@@ -187,4 +231,6 @@ def create_platform_backend() -> PlatformBackend:
         return MacOSBackend()
     if sys.platform == "win32":
         return WindowsBackend()
+    if hardware is not None and hardware.hdmi.enabled:
+        return CaptureCardBackend(_hid_transport(hardware))
     return NullBackend()
